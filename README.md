@@ -12,6 +12,7 @@ To use vMake, you need to write a "*vMakefile*". Only one I'm aware of is [Beelz
 It uses every feature of vMake.  
 
 Your vMakefile should always begin with...
+
     #!/usr/bin/env lua
     require "vmake"
 ... after which, you should declare all your projects, configurations, architectures, and command-line options.  
@@ -35,8 +36,10 @@ A default configuration and architecture can be specified with the `Default` fun
 (*note for those who are inexperienced with Lua: this is equivalent to `Default("amd64")("debug")` but it looks more declarative that way.*)
 
 These can be declared simply like...
+
     Configuration "release"
 ... or with more information, such as...
+
     Architecture "amd64" {
         Data = {
             Opts_GCC = List { "-m64" },
