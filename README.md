@@ -12,9 +12,10 @@ To use vMake, you need to write a "*vMakefile*". Only one I'm aware of is [Beelz
 It uses every feature of vMake.  
 
 Your vMakefile should always begin with...
-
-    #!/usr/bin/env lua
-    require "vmake"
+```lua
+#!/usr/bin/env lua
+require "vmake"
+```
 ... after which, you should declare all your projects, configurations, architectures, and command-line options.  
 As the code is not preprocessed/parsed in any way, feel free to include full proper Lua code to do whatever computation is required for the declared objects.  
 
@@ -32,23 +33,27 @@ They represent major decisions in the build process, and, once defined, are avai
 If no configuration or architecture is provided, default ones (called "default-conf" or "default-arch") will be provided.  
 
 A default configuration and architecture can be specified with the `Default` function as such:
-    Default "amd64" "debug"
+```lua
+Default "amd64" "debug"
+```
 (*note for those who are inexperienced with Lua: this is equivalent to `Default("amd64")("debug")` but it looks more declarative that way.*)
 
 These can be declared simply like...
-
-    Configuration "release"
+```lua
+Configuration "release"
+```
 ... or with more information, such as...
+```lua
+Architecture "amd64" {
+    Data = {
+        Opts_GCC = List { "-m64" },
 
-    Architecture "amd64" {
-        Data = {
-            Opts_GCC = List { "-m64" },
+        Opts_NASM = List { "-f", "elf64" },
+    },
 
-            Opts_NASM = List { "-f", "elf64" },
-        },
-
-        Base = "x86",
-    }
+    Base = "x86",
+}
+```
 
 As seen in the example above, they support inheritance, of sorts. Every confiuration can have a base configuration (used for data resolution), and every architecture can have a base architecture (same reason).  
 
