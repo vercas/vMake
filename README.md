@@ -107,7 +107,8 @@ They do this through three functions/properties:
     - `string` or `Path`: The destination file requires this specific source file;
     - `List` of `string`s and `Path`s: The destination file requires these specific source files;
     - `function`: Is given a destination path as argument and returns a `Path` or `List` of `string`s and `Path`s representing the source(s) for the destination path.
-- `Action`: A `function` which is given the destination `Path` and `List` of sources (even if just one), and should perform the steps necessary to obtain the destination path.
+- `Action`: A `function` which is given the destination `Path` and `List` of sources (even if just one), and should perform the steps necessary to obtain the destination path;
+- `Shared`: Whether the rule can be used by child components of the container or not.
 
 There should be rules available for every file that doesn't exist.  
 
@@ -176,4 +177,71 @@ Attempts to modify this table also result in an error.
 
 ## Build Process
 
-**TODO**: Document.
+A build targets a specific (top-level) project, architecture and configuration.  
+
+vMake's goal is to construct the files listed in the output of the selected project. To do this, it employs the work item resolution algorithm.  
+
+### Work Item Resolution
+
+When vMake tries to figure out how to construct a file, it employs a simple resolution algorithm.  
+
+First, it looks through all the rules of the current component to find one whose filter matches the path.  
+*If more than one rule matches, it's considered an error.*  
+
+If a rule wasn't found, it looks through the output list of all child components for a matching path.  
+*If more than one component lists the path as an output, it's also considered an error.*  
+
+If no rule or child component output was found to match the path, it restarts the algorithm from the parent component/project, if any, **but will only accept shared rules**.  
+
+If a rule is found, a *work item* is created.  
+This work item, or the entire child component which lists the path as output, becomes a dependency of whatever requested this path.  
+
+If a work item is created (from a rule), the sources of this file are retrieved according to the rule and this algorithm is applied to them as well.  
+
+If a source of an item cannot be found, **and it does not exist** in the filesystem, it is clearly an error.  
+
+### Execution
+
+The build process occurs by calling the `Action`s of every rule involved, for all the work items created.  
+These functions can only use a subset of the vMake API which can be translated into shell commands.  
+
+A work item will only be executed after its dependencies have successfully executed.  
+
+### Partial & Full Builds
+
+Having an overview of the whole project, vMake is capable of building only the pieces which are missing or out-of-date.  
+This is the default behaviour.  
+
+The opposite of this is a full build, which will execute every single work item to reconstruct every file possible.  
+To force a full build, pass the `--full` command-line argument to the vMakefile.  
+
+### Parallelism
+
+With the aid of **GNU Parallel**, which is an **optional** depdendency, vMake is capable of performing builds in parallel.  
+
+Firstly, the directed dependency graph represented by all the work items (some of which are grouped into `work load`s) is levelled. Items which have no dependencies, or all dependencies are up-to-date, are on level 0, and all the others are one level higher than their highest dependency.  
+This means every work item can be executed as soon as possible and no later.  
+
+The work items are executed and all the vMake functions they call are actually turned into shell commands which are logged.  
+When all the items finished execution, vMake knows every single command (or sequence of) that needs to be invoked to perform the build, and precisely when it can be executed.  
+
+These commands are written into files, separated by level, and then `parallel` is invoked with them.  
+
+To use parallelism, pass the `--jobs=#`/`-j #` command-line argument to the vMakefile, where `#` is the desired number of jobs that can run in parallel. `0` means unlimited, and `1` means usual serial execution.  
+To get the best performance out of parallel builds, it is recommended to provide the number of hardware threads to this argument. `0` usually yields equally good results, though.  
+
+#### Errors
+
+vMake is normally perfectly capable of reporting errors even when its actions are invoked indirectly by GNU Parallel, by reading its log files and correlating them with its record of commands and work items.  
+
+It will report precisely which commands failed (together with rule and destination path), with status code.  
+Note: It will report any number of failed commands, not just one.  
+
+#### Performance
+
+Parallel builds will be faster than serial builds, with the possible exception of some extreme edge cases.  
+Admittedly, it cannot compete yet with the likes of `GNU Make` in parallel speed, but maybe it will get there eventually.  
+
+#### Integration w/ Other Features
+
+Both partial and full builds can be parallelized, and the computation of work item levels takes this choice into account as well.  
