@@ -52,8 +52,8 @@ if arg then
 end
 
 local vmake, vmake__call, getEnvironment = {
-    Version = "1.2.0",
-    VersionNumber = 1002000,
+    Version = "1.2.1",
+    VersionNumber = 1002001,
 
     Debug = false,
     Silent = false,
@@ -4144,7 +4144,8 @@ function vmake.HandleCapture()
         for lvl = 0, #shFiles do
             local okay = sh.silent.tolerant("parallel", vmake.ParallelOpts
                 , "--joblog", shFiles[lvl].LogPath
-                , "-a", shFiles[lvl].Path)
+                , "-a", shFiles[lvl].Path
+                , "-j", vmake.Jobs)
 
             if not okay then
                 local fLog, errLog = io.open(tostring(shFiles[lvl].LogPath), "r")
