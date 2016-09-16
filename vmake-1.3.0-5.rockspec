@@ -1,5 +1,5 @@
 package = "vmake"
-version = "1.3.0-4"
+version = "1.3.0-5"
 
 source = {
     url = "git://github.com/vercas/vMake",
@@ -13,7 +13,7 @@ description = {
 }
 
 dependencies = {
-    "lua >= 5.2",
+    "lua >= 5.1",
 }
 
 build = {
