@@ -52,8 +52,8 @@ if arg then
 end
 
 local vmake, vmake__call, getEnvironment = {
-    Version = "1.2.1",
-    VersionNumber = 1002001,
+    Version = "1.3.0",
+    VersionNumber = 1003000,
 
     Debug = false,
     Silent = false,
@@ -86,6 +86,8 @@ vmake.Description = "vMake v" .. vmake.Version .. " [" .. vmake.VersionNumber
 .. "] (c) 2016 Alexandru-Mihai Maftei, running under " .. _VERSION
 
 pcall(require, "lfs")
+
+SH_AND, SH_SEP = {}, {}
 
 --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
 --  Top-level Declarations
@@ -3131,12 +3133,8 @@ local shellmeta = {
     __metatable = "Still no."
 }
 
-function shellmeta.__call(self, cmd, ...)
+local function shell_string(cmd, ...)
     local cmdType = assertType({"string", "Path"}, cmd, "command", 2)
-
-    if codeLoc ~= 0 and codeLoc ~= LOC_RULE_ACT and codeLoc ~= LOC_CMDO_HAN then
-        error("vMake error: Shell commands can only be executed from rule actions and command-line option handlers.")
-    end
 
     if cmdType == "Path" then
         cmd = tostring(cmd)
@@ -3153,8 +3151,12 @@ function shellmeta.__call(self, cmd, ...)
 
         if argType == "List" then
             arg:ForEach(function(item) appendArg(item, tab, errlvl) end)
+        elseif arg == SH_AND then
+            tab[#tab + 1] = "&&"
+        elseif arg == SH_SEP then
+            tab[#tab + 1] = ";"
         else
-            tab[#tab + 1] = escapeForShell(tostring(arg), tab)
+            tab[#tab + 1] = escapeForShell(tostring(arg))
         end
     end
 
@@ -3164,7 +3166,15 @@ function shellmeta.__call(self, cmd, ...)
         appendArg(args[i], tab, 2)
     end
 
-    cmd = table.concat(tab, " ")
+    return table.concat(tab, " ")
+end
+
+function shellmeta.__call(self, cmd, ...)
+    if codeLoc ~= 0 and codeLoc ~= LOC_RULE_ACT and codeLoc ~= LOC_CMDO_HAN then
+        error("vMake error: Shell commands can only be executed from rule actions and command-line option handlers.")
+    end
+
+    cmd = shell_string(cmd, ...)
 
     local printCmd = not (self[_key_shll_slnt] or vmake.Silent)
 
@@ -3222,6 +3232,8 @@ function shellmeta.__index(self, key)
             [_key_shll_slnt] = self[_key_shll_slnt],
             [_key_shll_tolr] = true
         }, shellmeta)
+    elseif key == "string" then
+        return shell_string
     else
         return rawget(self, key)
     end
@@ -4142,10 +4154,12 @@ function vmake.HandleCapture()
         end
 
         for lvl = 0, #shFiles do
-            local okay = sh.silent.tolerant("parallel", vmake.ParallelOpts
+            local okay = sh.silent.tolerant("sh", "-c",
+                sh.string("export", "PARALLEL_SHELL=/bin/sh", SH_AND
+                , "parallel", vmake.ParallelOpts
                 , "--joblog", shFiles[lvl].LogPath
                 , "-a", shFiles[lvl].Path
-                , "-j", vmake.Jobs)
+                , "-j", vmake.Jobs))
 
             if not okay then
                 local fLog, errLog = io.open(tostring(shFiles[lvl].LogPath), "r")
@@ -4292,7 +4306,7 @@ function vmake.PrintData()
 
         local newInd = ind .. "    "
 
-        if #wkit.Prerequisites > 0 then
+        if wkit.Prerequisites and #wkit.Prerequisites > 0 then
             res = res .. ind .. "  - Prerequisites: (" .. #wkit.Prerequisites .. ")\n"
                 .. table.concat(getListContainer(wkit.Prerequisites:Select(function(preq)
                     if typeEx(preq) == "WorkLoad" then
@@ -4305,7 +4319,7 @@ function vmake.PrintData()
             res = res .. ind .. "  - Prerequisites: NONE\n"
         end
 
-        if #wkit.Sources > 0 then
+        if wkit.Sources and #wkit.Sources > 0 then
             res = res .. ind .. "  - Sources: (" .. #wkit.Sources .. ")\n" .. ind .. "    "
                 .. table.concat(getListContainer(wkit.Sources:Select(function(sorc)
                     return tostring(sorc)
@@ -4587,7 +4601,6 @@ function DoNothing() end
 
 --  An action which copies a single source file to the destination.
 function CopySingleFileAction(_, dst, src)
-    fs.MkDir(dst:GetParent())
     fs.Copy(dst, src[1])
 end
 
