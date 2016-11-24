@@ -52,8 +52,8 @@ if arg then
 end
 
 local vmake, vmake__call, getEnvironment = {
-    Version = "1.3.0",
-    VersionNumber = 1003000,
+    Version = "1.3.1",
+    VersionNumber = 1003001,
 
     Debug = false,
     Silent = false,
@@ -1061,6 +1061,10 @@ do
         end,
 
         Equals = function(self, othr)
+            if othr == nil then
+                return false
+            end
+
             local othrType = typeEx(othr)
 
             if othrType == "string" then
@@ -3791,9 +3795,10 @@ function vmake.ConstructWorkGraph()
                         end
                     end
 
-                    if src.ModificationTime
+                    if (src.ModificationTime
                         and path.ModificationTime
-                        and src.ModificationTime <= path.ModificationTime then
+                        and src.ModificationTime <= path.ModificationTime)
+                        or (src.IsDirectory and src.Exists) then
                         --  Source NOT modified after the destination? Cool!
 
                         --MSG("Preq ", src, " of ", item, " is NOT outdated.")
