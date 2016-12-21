@@ -52,8 +52,8 @@ if arg then
 end
 
 local vmake, vmake__call, getEnvironment = {
-    Version = "1.3.1",
-    VersionNumber = 1003001,
+    Version = "1.4.0",
+    VersionNumber = 1004000,
 
     Debug = false,
     Silent = false,
@@ -63,6 +63,7 @@ local vmake, vmake__call, getEnvironment = {
     ShouldComputeGraph = true,
     ShouldDoWork = true,
     ShouldPrintGraph = false,
+    ShouldClean = false,
 
     FullBuild = false,
     WorkGraph = false,
@@ -4387,11 +4388,14 @@ end
 
 function vmake__call()
     vmake.ValidateAndDefault()
+    vmake.CheckArguments()
     vmake.ExpandProperties()
 
     vmake.ParallelOpts = vmake.Classes.List()
 
-    vmake.CheckArguments()
+    if vmake.ShouldClean then
+        sh.silent("rm", "-Rf", outDir)
+    end
 
     if vmake.ShouldComputeGraph then
         vmake.WorkGraph = vmake.ConstructWorkGraph()
@@ -4519,11 +4523,27 @@ CmdOpt "print" {
     end,
 }
 
+CmdOpt "clean" {
+    Description = "Cleans the output directory. Will not perform a build unless `--full` is also specified.",
+
+    Handler = function(_)
+        vmake.ShouldClean = true
+
+        if not vmake.FullBuild then
+            vmake.ShouldComputeGraph = false
+        end
+    end,
+}
+
 CmdOpt "full" {
     Description = "Indicates that work items should be executed even if they are considered up-to-date.",
 
     Handler = function(_)
         vmake.FullBuild = true
+
+        if vmake.ShouldClean then
+            vmake.ShouldComputeGraph = true
+        end
     end,
 }
 
@@ -4604,6 +4624,9 @@ _G.vmake = setmetatable({
 --  Does what it says on the tin. It's a blank tin.
 function DoNothing() end
 
+--  Ditto.
+function NewList() return List { } end
+
 --  An action which copies a single source file to the destination.
 function CopySingleFileAction(_, dst, src)
     fs.Copy(dst, src[1])
@@ -4617,7 +4640,7 @@ function ExcuseMissingFilesRule(ext)
     local rule = Rule "Excuse Missing Headers" {
         Filter = function(_, dst) return dst:CheckExtension(ext) and not fs.GetInfo(dst) end,
 
-        Source = List { },
+        Source = NewList,
 
         Action = DoNothing,
     }
