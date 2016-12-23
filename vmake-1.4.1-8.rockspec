@@ -1,9 +1,9 @@
 package = "vmake"
-version = "1.4.0-7"
+version = "1.4.1-8"
 
 source = {
     url = "git://github.com/vercas/vMake",
-    tag = "v1.4.0",
+    tag = "v1.4.1",
 }
 
 description = {

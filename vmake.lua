@@ -52,8 +52,8 @@ if arg then
 end
 
 local vmake, vmake__call, getEnvironment = {
-    Version = "1.4.0",
-    VersionNumber = 1004000,
+    Version = "1.4.1",
+    VersionNumber = 1004001,
 
     Debug = false,
     Silent = false,
@@ -4388,10 +4388,11 @@ end
 
 function vmake__call()
     vmake.ValidateAndDefault()
-    vmake.CheckArguments()
-    vmake.ExpandProperties()
 
     vmake.ParallelOpts = vmake.Classes.List()
+    vmake.CheckArguments()
+
+    vmake.ExpandProperties()
 
     if vmake.ShouldClean then
         sh.silent("rm", "-Rf", outDir)
