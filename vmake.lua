@@ -52,8 +52,8 @@ if arg then
 end
 
 local vmake, vmake__call, getEnvironment = {
-    Version = "1.4.1",
-    VersionNumber = 1004001,
+    Version = "1.4.2",
+    VersionNumber = 1004002,
 
     Debug = false,
     Silent = false,
@@ -3801,8 +3801,9 @@ function vmake.ConstructWorkGraph()
                         and src.ModificationTime <= path.ModificationTime)
                         or (src.IsDirectory and src.Exists) then
                         --  Source NOT modified after the destination? Cool!
+                        --  Source is an existing directory? Also cool!
 
-                        --MSG("Preq ", src, " of ", item, " is NOT outdated.")
+                        -- MSG("Preq ", src, " of ", item, " is NOT outdated.")
 
                         return
                     end
@@ -3810,7 +3811,7 @@ function vmake.ConstructWorkGraph()
                     outdated = true
                     --  Otherwise, this is definitely an outdated item.
 
-                    --MSG("Preq ", src, " of ", item, " is outdated!")
+                    -- MSG("Preq ", src, " of ", item, " is outdated!")
 
                     if not subFound then
                         --  Nothing? Means this file ought to already exist.
@@ -3826,6 +3827,11 @@ function vmake.ConstructWorkGraph()
                         end
                     end
                 end)
+            else
+                --  This item has no sources, therefore it is considered outdated
+                --  if it doesn't exist.
+
+                outdated = not path.Exists
             end
 
             setWorkEntityOutdated(item, outdated)
