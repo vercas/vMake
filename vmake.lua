@@ -52,13 +52,15 @@ if arg then
 end
 
 local vmake, vmake__call, getEnvironment = {
-    Version = "1.4.2",
-    VersionNumber = 1004002,
+    Version = "1.5.0",
+    VersionNumber = 1005000,
 
     Debug = false,
     Silent = false,
     Verbose = false,
     Jobs = false,
+
+    GlobalDataContainer = false,
 
     ShouldComputeGraph = true,
     ShouldDoWork = true,
@@ -350,6 +352,15 @@ function CmdOpt(name)
     end
 
     return func
+end
+
+function GlobalData(tab)
+    if vmake.GlobalDataContainer then
+        error("vMake error: Global data is already defined.", 2)
+    end
+
+    vmake.GlobalDataContainer = vmake.Classes.WithData()
+    vmake.GlobalDataContainer.Data = tab
 end
 
 --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
@@ -1963,6 +1974,8 @@ do
             else
                 error("vMake error: " .. tostring(conf) .. " defined with unknown base \"" .. conf[_key_conf_base] .. "\".", errlvl + 1)
             end
+        else
+            linkDataWithOther(conf, vmake.GlobalDataContainer, errlvl + 1)
         end
     end
 end
@@ -2040,6 +2053,8 @@ do
             else
                 error("vMake error: " .. tostring(arch) .. " defined with unknown base \"" .. arch[_key_arch_base] .. "\".", errlvl + 1)
             end
+        else
+            linkDataWithOther(arch, vmake.GlobalDataContainer, errlvl + 1)
         end
     end
 end
@@ -3322,7 +3337,7 @@ do
             envind.conf = obj
         elseif objType == "CmdOpt" then
             envind.opt = obj
-        elseif obj then
+        elseif objType ~= "WithData" then
             error("vMake internal error: Uknown object type '" .. objType .. "' (" .. tostring(obj) .. ") for environment creation.")
         end
 
@@ -3361,9 +3376,13 @@ function vmake.ValidateAndDefault()
         assert(val.Output, "vMake error: " .. tostring(val) .. " does not define any output.")
 
         if val.Directory then
-            --  TODO: Make sure it exists.
+            assert(fs.GetInfo(val.Directory), "vMake error: " .. tostring(val) .. " is defined with a non-existing directory.")
         else
             val.Directory = DirPath "."
+        end
+
+        if vmake.GlobalDataContainer then
+            linkDataWithOther(val, vmake.GlobalDataContainer, 2)
         end
     end
 
@@ -3376,7 +3395,7 @@ function vmake.ValidateAndDefault()
         assert(val.Output, "vMake error: " .. tostring(val) .. " does not define any output.")
 
         if val.Directory then
-            --  TODO: Make sure it exists.
+            assert(fs.GetInfo(val.Directory), "vMake error: " .. tostring(val) .. " is defined with a non-existing directory.")
         else
             val.Directory = DirPath "."
         end
@@ -3390,8 +3409,6 @@ function vmake.ValidateAndDefault()
         assert(val.Owner, "vMake error: " .. tostring(val) .. " is not a member of anything.")
         assert(val.Filter, "vMake error: " .. tostring(val) .. " does not define a filter.")
         assert(val.Action, "vMake error: " .. tostring(val) .. " does not define an action.")
-
-        --  TODO: Defaults.
     end
 
     --  Step 4, validate archs and configs.
@@ -3416,11 +3433,19 @@ function vmake.ValidateAndDefault()
         normalizeConfigBase(val, 2)
     end
 
-    --  Step 5, check defaults.
+    --  Step 5, command-line options.
+
+    for i = 1, #cmdlopts do
+        local val = cmdlopts[i]
+
+        if vmake.GlobalDataContainer then
+            linkDataWithOther(val, vmake.GlobalDataContainer, 2)
+        end
+    end
+
+    --  Step 6, check defaults.
 
     if not defaultProj then
-        --  TODO: Check for a chosen project to build.
-
         if #projects > 1 then
             error("vMake error: No default project specified when there is more than one project defined.")
         end
@@ -3429,8 +3454,6 @@ function vmake.ValidateAndDefault()
     end
 
     if not defaultArch then
-        --  TODO: Check for a chosen architecture to build.
-
         if #archs > 1 then
             error("vMake error: No default architecture specified when there is more than one architecture defined.")
         end
@@ -3439,8 +3462,6 @@ function vmake.ValidateAndDefault()
     end
 
     if not defaultConf then
-        --  TODO: Check for a chosen configuration to build.
-
         if #configs > 1 then
             error("vMake error: No default configuration specified when there is more than one configuration defined.")
         end
@@ -3466,7 +3487,7 @@ function vmake.ExpandProperties()
         local fnc = outDir
         outDir = nil
 
-        OutputDirectory(fnc(getEnvironment(false)))
+        OutputDirectory(fnc(getEnvironment(vmake.GlobalDataContainer)))
     end
 
     --  Step 2, projects.
