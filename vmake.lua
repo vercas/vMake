@@ -52,8 +52,8 @@ if arg then
 end
 
 local vmake, vmake__call, getEnvironment = {
-    Version = "1.5.1",
-    VersionNumber = 1005001,
+    Version = "1.5.2",
+    VersionNumber = 1005002,
 
     Debug = false,
     Silent = false,
@@ -355,12 +355,12 @@ function CmdOpt(name)
 end
 
 function GlobalData(tab)
-    if vmake.GlobalDataContainer then
-        error("vMake error: Global data is already defined.", 2)
+    if not vmake.GlobalDataContainer then
+        vmake.GlobalDataContainer = vmake.Classes.WithData()
     end
 
-    vmake.GlobalDataContainer = vmake.Classes.WithData()
     vmake.GlobalDataContainer.Data = tab
+    --  Will work multiple times.
 end
 
 --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
@@ -1757,7 +1757,7 @@ do
 
     vmake.CreateClass("Data", nil, {
         __init = function(self, base)
-            self[_key_data_base] = base
+            self[_key_data_base] = base or {}
             self[_key_data_comp] = {}
             self[_key_data_ownr] = false
             self[_key_data_next] = false
@@ -1836,9 +1836,11 @@ do
     end
 
     function mergeData(data, new, errlvl)
-        local base = self[_key_data_base]
+        local base = data[_key_data_base]
 
         for k, v in pairs(new) do
+            assertType({"string", "number"}, k, "merge data key", errlvl + 1)
+
             if base[k] ~= nil then
                 error("vMake error: Data merge conflict - key \"" .. tostring(k) .. "\" already defined.", errlvl + 1)
             end
@@ -1857,8 +1859,10 @@ do
 
     vmake.CreateClass("WithData", nil, {
         __init = function(self)
-            self[_key_wida_data] = false
+            self[_key_wida_data] = vmake.Classes.Data()
             self[_key_wida_dnxt] = false
+
+            setDataOwner(self[_key_wida_data], self, errlvl)
         end,
 
         Data = {
@@ -1867,25 +1871,9 @@ do
             end,
 
             set = function(self, val, errlvl)
-                errlvl = errlvl + 1
+                local valType = assertType("table", val, "data", errlvl + 1)
 
-                if self[_key_wida_data] then
-                    error("vMake error: " .. tostring(self) .. " already contains data.", errlvl)
-                end
-
-                local valType = assertType({"table", "Data"}, val, "data", errlvl)
-
-                if valType == "table" then
-                    for k, v in pairs(val) do
-                        assertType({"string", "number"}, k, "data key", errlvl)
-                    end
-
-                    val = vmake.Classes.Data(val)
-                end
-
-                self[_key_wida_data] = val
-                setDataOwner(val, self, errlvl)
-                setDataNext(val, self[_key_wida_dnxt], errlvl)
+                mergeData(self[_key_wida_data], val, errlvl + 1)
             end,
         },
     })
@@ -3640,7 +3628,11 @@ function vmake.ExpandProperties()
         local fnc = outDir
         outDir = nil
 
+        local oldCodeLoc = codeLoc; codeLoc = LOC_DATA_EXP
+
         OutputDirectory(fnc(getEnvironment(vmake.GlobalDataContainer)))
+
+        codeLoc = oldCodeLoc
     end
 
     --  Step 2, projects.
@@ -4750,7 +4742,12 @@ function ExcuseMissingFilesRule(ext)
     }
 
     if extType == "function" then
+        local oldCodeLoc = codeLoc; codeLoc = LOC_DATA_EXP
+
         ext = ext(getEnvironment(rule))
+
+        codeLoc = oldCodeLoc
+
         extType = assertType({"string", "List", "table"}, ext, "extension expansion", 2)
     end
 
