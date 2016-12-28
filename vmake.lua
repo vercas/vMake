@@ -52,8 +52,8 @@ if arg then
 end
 
 local vmake, vmake__call, getEnvironment = {
-    Version = "1.5.0",
-    VersionNumber = 1005000,
+    Version = "1.5.1",
+    VersionNumber = 1005001,
 
     Debug = false,
     Silent = false,
@@ -1908,12 +1908,13 @@ end
 --  --  --  --  --  --  --  --
 
 do
-    local _key_conf_name, _key_conf_base = {}, {}
+    local _key_conf_name, _key_conf_base, _key_conf_aux = {}, {}, {}
 
     vmake.CreateClass("Configuration", "WithData", {
         __init = function(self, name)
             self[_key_conf_name] = name
             self[_key_conf_base] = false
+            self[_key_conf_aux ] = false
         end,
 
         __tostring = function(self)
@@ -1929,6 +1930,7 @@ do
         end,
 
         Name = { RETRIEVE = _key_conf_name },
+        Auxiliary = { OVERRIDE = _key_conf_aux, TYPE = "boolean" },
 
         Base = {
             get = function(self)
@@ -3461,6 +3463,8 @@ function vmake.ValidateAndDefault()
         defaultArch = archs[1]
     end
 
+    assert(not defaultArch.Auxiliary, "vMake error: Default architecture is auxiliary.")
+
     if not defaultConf then
         if #configs > 1 then
             error("vMake error: No default configuration specified when there is more than one configuration defined.")
@@ -3468,6 +3472,8 @@ function vmake.ValidateAndDefault()
 
         defaultConf = configs[1]
     end
+
+    assert(not defaultConf.Auxiliary, "vMake error: Default configuration is auxiliary.")
 
     if not outDir then
         if #archs > 1 or #configs > 1 then
@@ -3478,39 +3484,6 @@ function vmake.ValidateAndDefault()
             OutputDirectory "./.vmake"
         end
     end
-end
-
-function vmake.ExpandProperties()
-    --  Step 1, the output directory.
-
-    if type(outDir) == "function" then
-        local fnc = outDir
-        outDir = nil
-
-        OutputDirectory(fnc(getEnvironment(vmake.GlobalDataContainer)))
-    end
-
-    --  Step 2, projects.
-
-    for i = #projects, 1, -1 do
-        local val = projects[i]
-
-        val:ExpandOutput(3)
-        val:ExpandDependencies(3)
-    end
-
-    --  Step 3, components.
-
-    for i = #comps, 1, -1 do
-        local val = comps[i]
-
-        val:ExpandOutput(3)
-        val:ExpandDependencies(3)
-    end
-
-    --  Step 4, misc.
-
-    vmake.JobsDir = outDir + ".jobs"
 end
 
 function vmake.CheckArguments()
@@ -3636,12 +3609,16 @@ function vmake.CheckArguments()
                     end
 
                     selArch = arch
+                    
+                    assert(not arch.Auxiliary, "vMake error: Selected architecture is auxiliary.")
                 elseif conf then
                     if selConf then
                         error("vMake error: Default configuration is already chosen to be " .. tostring(selConf) .. "; cannot set it to " .. tostring(conf) .. ".")
                     end
 
                     selConf = conf
+                    
+                    assert(not conf.Auxiliary, "vMake error: Selected configuration is auxiliary.")
                 else
                     error("vMake error: There is no project, architecture or configuration named \"" .. cur .. "\".")
                 end
@@ -3654,6 +3631,39 @@ function vmake.CheckArguments()
     if selProj then defaultProj = selProj end
     if selArch then defaultArch = selArch end
     if selConf then defaultConf = selConf end
+end
+
+function vmake.ExpandProperties()
+    --  Step 1, the output directory.
+
+    if type(outDir) == "function" then
+        local fnc = outDir
+        outDir = nil
+
+        OutputDirectory(fnc(getEnvironment(vmake.GlobalDataContainer)))
+    end
+
+    --  Step 2, projects.
+
+    for i = #projects, 1, -1 do
+        local val = projects[i]
+
+        val:ExpandOutput(3)
+        val:ExpandDependencies(3)
+    end
+
+    --  Step 3, components.
+
+    for i = #comps, 1, -1 do
+        local val = comps[i]
+
+        val:ExpandOutput(3)
+        val:ExpandDependencies(3)
+    end
+
+    --  Step 4, misc.
+
+    vmake.JobsDir = outDir + ".jobs"
 end
 
 function vmake.ConstructWorkGraph()
@@ -4479,10 +4489,36 @@ CmdOpt "help" "h" {
     Handler = function(_)
         local parts = {}
 
+        local function printHierarchy(val)
+            parts[#parts + 1] = "    - "
+            parts[#parts + 1] = val.Name
+
+            local tmp = val.Base
+
+            while tmp do
+                parts[#parts + 1] = " -> "
+                parts[#parts + 1] = tmp.Name
+
+                tmp = tmp.Base
+            end
+
+            parts[#parts + 1] = "\n"
+        end
+
+        local function printDesc(val)
+            if val.Description then
+                for line in val.Description:iteratesplit("\n", true) do
+                    parts[#parts + 1] = "        "
+                    parts[#parts + 1] = line
+                    parts[#parts + 1] = "\n"
+                end
+            end
+        end
+
         if arg and arg[0] then
             parts[#parts + 1] = "Usage: "
             parts[#parts + 1] = arg[0]
-            parts[#parts + 1] = " [options] [--] [project, architecture & configuration]\n"
+            parts[#parts + 1] = " [options] [--] [project, architecture & configuration]\n\n"
         end
 
         for i = 1, #cmdlopts do
@@ -4510,14 +4546,48 @@ CmdOpt "help" "h" {
 
             parts[#parts + 1] = "\n"
 
-            if opt.Description then
-                parts[#parts + 1] = "        "
-                parts[#parts + 1] = opt.Description
-                parts[#parts + 1] = "\n"
+            printDesc(opt)
+
+            parts[#parts + 1] = "\n"
+        end
+
+        parts[#parts + 1] = "Projects:\n"
+
+        for i = 1, #projects do
+            local val = projects[i]
+
+            parts[#parts + 1] = "    - "
+            parts[#parts + 1] = val.Name
+            parts[#parts + 1] = "\n"
+
+            printDesc(val)
+        end
+
+        parts[#parts + 1] = "\nArchitectures:\n"
+
+        for i = 1, #archs do
+            local val = archs[i]
+            local tmp = val.Base
+
+            if not val.Auxiliary then
+                printHierarchy(val)
+                printDesc(val)
             end
         end
 
-        parts[#parts + 1] = "Powered by "
+        parts[#parts + 1] = "\nConfigurations:\n"
+
+        for i = 1, #configs do
+            local val = configs[i]
+            local tmp = val.Base
+
+            if not val.Auxiliary then
+                printHierarchy(val)
+                printDesc(val)
+            end
+        end
+
+        parts[#parts + 1] = "\nPowered by "
         parts[#parts + 1] = vmake.Description
 
         print(table.concat(parts))
@@ -4534,8 +4604,9 @@ CmdOpt "version" "v" {
     end,
 }
 
-CmdOpt "debug" "d" {
-    Description = "Enables some debugging features, making the code more strict, exposing possibly unwanted behaviour.",
+CmdOpt "debug" {
+    Description = "Enables some debugging features, making the code more strict,"
+             .. "\nexposing possibly unwanted behaviour.",
 
     Handler = function(_)
         vmake.Debug = true
@@ -4543,7 +4614,8 @@ CmdOpt "debug" "d" {
 }
 
 CmdOpt "print" {
-    Description = "Prints all the defined data and the computed work graph (a directed dependency graph) which would otherwise be executed.",
+    Description = "Prints all the defined data and the computed work graph"
+             .. "\n(a directed dependency graph) which would otherwise be executed.",
 
     Handler = function(_)
         vmake.ShouldPrintGraph = true
@@ -4551,8 +4623,9 @@ CmdOpt "print" {
     end,
 }
 
-CmdOpt "clean" {
-    Description = "Cleans the output directory. Will not perform a build unless `--full` is also specified.",
+CmdOpt "clean" "c" {
+    Description = "Cleans the output directory."
+             .. "\nWill not perform a build unless `--full` is also specified.",
 
     Handler = function(_)
         vmake.ShouldClean = true
@@ -4563,8 +4636,9 @@ CmdOpt "clean" {
     end,
 }
 
-CmdOpt "full" {
-    Description = "Indicates that work items should be executed even if they are considered up-to-date.",
+CmdOpt "full" "f" {
+    Description = "Indicates that work items should be executed even if they"
+             .. "\nare considered up-to-date.",
 
     Handler = function(_)
         vmake.FullBuild = true
@@ -4576,7 +4650,8 @@ CmdOpt "full" {
 }
 
 CmdOpt "jobs" "j" {
-    Description = "Number of jobs to use for rule action execution. 0 means unlimited. Defaults to 1, meaning serial execution.",
+    Description = "Number of jobs to use for rule action execution."
+             .. "\n0 means unlimited. Defaults to 1, meaning serial execution.",
 
     Type = "integer",
 
@@ -4616,7 +4691,8 @@ CmdOpt "silent" {
 }
 
 CmdOpt "verbose" {
-    Description = "Outputs more detailed information to standard output, such as the steps taken by vMake and all shell commands executed.",
+    Description = "Outputs more detailed information to standard output,"
+             .. "\nsuch as the steps taken by vMake and all shell commands executed.",
 
     Handler = function(_)
         if vmake.Silent then
