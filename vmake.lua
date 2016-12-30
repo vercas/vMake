@@ -52,8 +52,8 @@ if arg then
 end
 
 local vmake, vmake__call, getEnvironment = {
-    Version = "1.5.3",
-    VersionNumber = 1005003,
+    Version = "1.5.4",
+    VersionNumber = 1005004,
 
     Debug = false,
     Silent = false,
@@ -4778,7 +4778,7 @@ function CreateMissingDirectoriesRule(shared)
         Action = function(_, dst, src)
             fs.MkDir(dst)
         end,
-    },
+    }
 end
 
 --  Parses the GCC-generated Make dependency file associated with the given
