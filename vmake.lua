@@ -52,8 +52,8 @@ if arg then
 end
 
 local vmake, vmake__call, getEnvironment = {
-    Version = "1.5.2",
-    VersionNumber = 1005002,
+    Version = "1.5.3",
+    VersionNumber = 1005003,
 
     Debug = false,
     Silent = false,
@@ -4766,6 +4766,19 @@ function ExcuseMissingFilesRule(ext)
     end
 
     return rule
+end
+
+--  Creates a rule which creates missing directories.
+function CreateMissingDirectoriesRule(shared)
+    return Rule "Create Missing Directories" {
+        Shared = shared or false,
+
+        Filter = function(_, dst) return dst.IsDirectory end,
+
+        Action = function(_, dst, src)
+            fs.MkDir(dst)
+        end,
+    },
 end
 
 --  Parses the GCC-generated Make dependency file associated with the given
