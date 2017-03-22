@@ -52,8 +52,8 @@ if arg then
 end
 
 local vmake, vmake__call, getEnvironment = {
-    Version = "1.5.4",
-    VersionNumber = 1005004,
+    Version = "1.6.0",
+    VersionNumber = 1006000,
 
     Debug = false,
     Silent = false,
@@ -90,7 +90,7 @@ vmake.Description = "vMake v" .. vmake.Version .. " [" .. vmake.VersionNumber
 
 pcall(require, "lfs")
 
-SH_AND, SH_SEP = {}, {}
+SH_AND, SH_SEP, SH_RAW = {}, {}, {}
 
 --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
 --  Top-level Declarations
@@ -416,9 +416,373 @@ function MSG(...)
     print(table.concat(items))
 end
 
-function assertType(tname, val, vname, errlvl)
-    local valType = typeEx(val)
+local function prettyString(val)
+    if type(val) == "string" then
+        return string.format("%q", val)
+    else
+        return tostring(val)
+    end
+end
 
+local function printTable(t, append, indent, done)
+    local myIndent = string.rep("\t", indent)
+
+    for key, value in pairs(t) do
+        append(myIndent)
+        append(prettyString(key))
+
+        if typeEx(value) == "table" and not done[value] then
+            done[value] = true
+
+            local ts = tostring(value)
+
+            if ts:sub(1, 9) == "table: 0x" then
+                append ": "
+                append(ts)
+                append "\n"
+                printTable(value, append, indent + 1, done)
+            else
+                append " = "
+                append(ts)
+                append "\n"
+            end
+        else
+            append " = "
+            append(prettyString(value))
+            append "\n"
+        end
+    end
+end
+
+local function printEndData(self, indent, out)
+    indent = indent or 0
+
+    local myIndent = string.rep("\t", indent)
+
+    local res = { myIndent, "ERROR:\t", self.Error, "\n" }
+    local function append(val, blergh, ...)
+        res[#res + 1] = val
+
+        if blergh then
+            append(blergh, ...)
+        end
+    end
+
+    myIndent = myIndent .. "\t"
+
+    for i = 1, #self.Stack do
+        local info, appendSource = self.Stack[i]
+        
+        append(myIndent)
+        append(tostring(i))
+        append "\t"
+
+        if vmake.Verbose or vmake.Debug then
+            function appendSource()
+                append "\n"
+                append(myIndent)
+                append "\t  location: "
+
+                if info.what ~= "C" then
+                    append(info.short_src or info.source)
+
+                    if info.currentline then
+                        append ":"
+                        append(tostring(info.currentline))
+                    end
+                    
+                    append "\n"
+
+                    if info.what == "Lua" and info.linedefined and (info.linedefined ~= info.currentline or info.lastlinedefined ~= info.currentline) then
+                        --  This hides the definition of inline functions that will contain the erroneous line of code anyway.
+                        --  Also excludes C code and main chunks, which show placeholder values there.
+
+                        append(myIndent)
+                        append "\t  definition at "
+
+                        append(tostring(info.linedefined))
+
+                        if info.lastlinedefined then
+                            append "-"
+                            append(tostring(info.lastlinedefined))
+                        end
+                
+                        append "\n"
+                    end
+                else
+                    append "C\n"
+                end
+            end
+        else
+            function appendSource()
+                append "\t"
+
+                if info.what ~= "C" then
+                    append "  "
+                    append(info.short_src or info.source)
+
+                    if info.currentline then
+                        append ":"
+                        append(tostring(info.currentline))
+                    end
+
+                    if info.what == "Lua" and info.linedefined and (info.linedefined ~= info.currentline or info.lastlinedefined ~= info.currentline) then
+                        --  This hides the definition of inline functions that will contain the erroneous line of code anyway.
+                        --  Also excludes C code and main chunks, which show placeholder values there.
+
+                        append "\t  def. at "
+
+                        append(tostring(info.linedefined))
+
+                        if info.lastlinedefined then
+                            append "-"
+                            append(tostring(info.lastlinedefined))
+                        end
+                    end
+                
+                    append "\n"
+                else
+                    append "  [C]\n"
+                end
+            end
+        end
+
+        if info.istailcall then
+            append "tail calls..."
+
+            if info.short_src or info.source then
+                appendSource()
+            else
+                append "\n"
+            end
+        elseif info.name then
+            --  This is a named function!
+
+            append(info.namewhat)
+            append "\t"
+            append(info.name)
+            appendSource()
+        elseif info.what == "Lua" then
+            --  Unnamed Lua function = anonymous
+
+            append "anonymous function"
+            appendSource()
+        elseif info.what == "main" then
+            --  This is the main chunk of code that is executing.
+
+            append "main chunk"
+            appendSource()
+        elseif info.what == "C" then
+            --  This might be what invoked the main chunk.
+
+            append "unknown C code\n"
+        end
+
+        --  Now, upvalues, locals, parameters...
+
+        if info.what ~= "C" and (vmake.Verbose or vmake.Debug) then
+            --  Both main chunk and Lua functions can haz these.
+
+            append(myIndent)
+            append "\t  "
+
+            if info.nparams == 1 then
+                append "1 parameter; "
+            else
+                append(tostring(info.nparams))
+                append " parameters; "
+            end
+
+            if #info._locals - info.nparams == 1 then
+                append "1 local; "
+            else
+                append(tostring(#info._locals - info.nparams))
+                append " locals; "
+            end
+
+            if info.nups == 1 then
+                append "1 upvalue\n"
+            else
+                append(tostring(info.nups))
+                append " upvalues\n"
+            end
+
+            local extraIndent = myIndent .. "\t\t"
+            local done = { [_G] = true, [vmake] = true, }
+
+            for j = 1, #info._locals do
+                local key, value = info._locals[j].name, info._locals[j].value
+
+                append(extraIndent)
+                append(prettyString(key))
+
+                if typeEx(value) == "table" and not done[value] then
+                    done[value] = true
+
+                    local ts = tostring(value)
+
+                    if ts:sub(1, 9) == "table: 0x" then
+                        append ": "
+                        append(ts)
+                        append "\n"
+                        printTable(value, append, indent + 4, done)
+                    else
+                        append " = "
+                        append(ts)
+                        append "\n"
+                    end
+                else
+                    append " = "
+                    append(prettyString(value))
+                    append "\n"
+                end
+            end
+
+            if info._upvalues then
+                for j = 1, #info._upvalues do
+                    local key, value = info._upvalues[j].name, info._upvalues[j].value
+
+                    append(extraIndent)
+                    append(prettyString(key))
+
+                    if typeEx(value) == "table" and not done[value] then
+                        done[value] = true
+
+                        local ts = tostring(value)
+
+                        if ts:sub(1, 9) == "table: 0x" then
+                            append ": "
+                            append(ts)
+                            append "\n"
+                            printTable(value, append, indent + 4, done)
+                        else
+                            append " = "
+                            append(ts)
+                            append "\n"
+                        end
+                    else
+                        append " = "
+                        append(prettyString(value))
+                        append "\n"
+                    end
+                end
+            end
+        end
+    end
+
+    res = table.concat(res)
+
+    if out then
+        return out(res)
+    else
+        return res
+    end
+end
+
+local function queuefunc(fnc, functionlist, donefunctions)
+    if donefunctions[fnc] then return end
+
+    functionlist[#functionlist+1] = fnc
+    donefunctions[fnc] = true
+end
+
+function vcall(fnc, ...)
+    local endData
+
+    local ret = {xpcall(fnc, function(err)
+        local functionlist, donefunctions = {}, {}
+
+        local stack, thesaurus = {}, {}
+
+        local i = 2
+
+        while true do
+            local info = debug.getinfo(i)
+
+            if not info then
+                break
+            end
+
+            stack[#stack+1] = info
+            info._stackpos = i
+
+            if info.func then
+                thesaurus[info.func] = info
+                queuefunc(info.func, functionlist, donefunctions)
+                info.func = tostring(info.func)
+            end
+
+            --if info.what == "Lua" then
+            info._locals = {}
+            local locals = info._locals
+
+            local j = 1
+
+            while true do
+                local n, v = debug.getlocal(i, j)
+
+                if not n then break end
+
+                locals[#locals+1] = {name=n,value=v}
+
+                if type(v) == "function" then
+                    queuefunc(v, functionlist, donefunctions)
+                    locals[#locals].value = tostring(locals[#locals].value)
+                end
+
+                j = j + 1
+            end
+            --end
+
+            i = i + 1
+        end
+
+        for i = 1, #functionlist do
+            local fnc = functionlist[i]
+
+            local info
+
+            if thesaurus[fnc] then
+                info = thesaurus[fnc]
+            else
+                info = debug.getinfo(fnc)
+                thesaurus[fnc] = info
+            end
+
+            local ups = {}
+            info._upvalues = ups
+
+            for j = 1, info.nups do
+                local n, v = debug.getupvalue(fnc, j)
+
+                ups[#ups+1] = {name=n,value=v}
+
+                if type(v) == "function" then
+                    queuefunc(v, functionlist, donefunctions)
+                    ups[#ups].value = tostring(ups[#ups].value)
+                end
+            end
+        end
+
+        local newthesaurus = {}
+
+        for k, v in pairs(thesaurus) do
+            newthesaurus[tostring(k)] = v
+        end
+
+        endData = { Stack = stack, Thesaurus = newthesaurus, Error = err, ShortTrace = debug.traceback(nil, 2), Print = printEndData }
+    end, ...)}
+
+    if endData then
+        endData.Return = ret
+    else
+        endData = { Return = ret }
+    end
+
+    return endData
+end
+
+function assertTypeEx(tname, valType, val, vname, errlvl)
     assert(type(valType) == "string", "vMake internal error: Argument #2 to 'assertType' should be a string.")
 
     if type(tname) == "string" then
@@ -460,6 +824,10 @@ function assertType(tname, val, vname, errlvl)
     end
 
     return valType
+end
+
+function assertType(tname, val, vname, errlvl)
+    return assertTypeEx(tname, typeEx(val), val, vname, errlvl and (errlvl + 1) or 1)
 end
 
 function checkName(name, obj, errlvl)
@@ -508,6 +876,19 @@ function table.isarray(tab)
     end
 
     return true
+end
+
+function table.tostring(t, indent)
+    indent = indent or 0
+
+    local res = {}
+    local function append(val)
+        res[#res + 1] = val
+    end
+
+    printTable(t, append, indent, { [_G] = true, [vmake] = true })
+
+    return table.concat(res);
 end
 
 do
@@ -1730,6 +2111,30 @@ do
             return new
         end,
 
+        SelectUnique = function(self, trans)
+            assertType("function", trans, "transformer", 2)
+
+            local new = vmake.Classes.List()
+            local othr, lenS, this = new[_key_list_cont], #self[_key_list_cont], self[_key_list_cont]
+
+            for i = 1, lenS do
+                local item, add = trans(this[i]), true
+
+                for j = 1, #othr do
+                    if othr[j] == item then
+                        add = false
+                        break
+                    end
+                end
+
+                if add then
+                    othr[#othr + 1] = item
+                end
+            end
+
+            return new
+        end,
+
         ForEach = function(self, action, extreme)
             assertType("function", action, "action", 2)
 
@@ -1740,6 +2145,10 @@ do
             end
 
             return self, extreme
+        end,
+
+        Unpack = function(self)
+            return unpack(self[_key_list_cont])
         end,
     })
 
@@ -3150,6 +3559,7 @@ local function shell_string(cmd, ...)
         cmd = tostring(cmd)
     end
 
+    local nextIsRaw = false
     local function appendArg(arg, tab, errlvl)
         errlvl = errlvl + 1
 
@@ -3159,12 +3569,20 @@ local function shell_string(cmd, ...)
 
         local argType = typeEx(arg)
 
-        if argType == "List" then
+        if nextIsRaw then
+            assertTypeEx("string", argType, arg, "command argument", errlvl + 1)
+
+            tab[#tab + 1] = arg
+
+            nextIsRaw = false
+        elseif argType == "List" then
             arg:ForEach(function(item) appendArg(item, tab, errlvl) end)
         elseif arg == SH_AND then
             tab[#tab + 1] = "&&"
         elseif arg == SH_SEP then
             tab[#tab + 1] = ";"
+        elseif arg == SH_RAW then
+            nextIsRaw = true
         else
             tab[#tab + 1] = escapeForShell(tostring(arg))
         end
@@ -3186,7 +3604,7 @@ function shellmeta.__call(self, cmd, ...)
 
     cmd = shell_string(cmd, ...)
 
-    local printCmd = not (self[_key_shll_slnt] or vmake.Silent)
+    local printCmd = vmake.Verbose or not (self[_key_shll_slnt] or vmake.Silent)
 
     if codeLoc == LOC_RULE_ACT and vmake.Capturing then
         local lastLog = vmake.CommandLog:Last()
@@ -4094,19 +4512,19 @@ function vmake.DoWork()
         local oldCodeLoc = codeLoc; codeLoc = LOC_RULE_ACT
         curWorkItem = item
 
-        local res1, res2 = pcall(item.Rule.Action, getEnvironment(item.Rule), item.Path, item.Sources)
+        res = vcall(item.Rule.Action, getEnvironment(item.Rule), item.Path, item.Sources)
 
         curWorkItem = nil
         codeLoc = oldCodeLoc
 
-        if not res1 then
+        if res.Error then
             io.stderr:write("Failed to execute action of ", tostring(item.Rule)
-                , " for \"", tostring(item.Path), "\":\n", tostring(res2), "\n")
+                , " for \"", tostring(item.Path), "\":\n", res:Print())
         end
 
         setWorkEntityDone(item)
 
-        return res1
+        return not res.Error
     end
     
     doLoad = function(load)
@@ -4733,39 +5151,45 @@ end
 function ExcuseMissingFilesRule(ext)
     local extType = assertType({"string", "List", "table", "function"}, ext, "extension", 2)
 
-    local rule = Rule "Excuse Missing Headers" {
-        Filter = function(_, dst) return dst:CheckExtension(ext) and not fs.GetInfo(dst) end,
+    return Rule "Excuse Missing Headers" {
+        Data = {
+            ExcusedExtensions = function(_)
+                if extType == "function" then
+                    local oldCodeLoc = codeLoc; codeLoc = LOC_DATA_EXP
+
+                    ext = ext(_)
+
+                    codeLoc = oldCodeLoc
+
+                    extType = assertType({"string", "List", "table"}, ext, "extension expansion", 2)
+                end
+
+                if extType == "string" then
+                    ext = vmake.Classes.List(true, { ext })
+                else
+                    for i = 1, #ext do
+                        assertType("string", ext[i], "extension #" .. i, 2)
+                    end
+
+                    if extType == "table" then
+                        ext = vmake.Classes.List(true, ext)
+                    else
+                        ext:Seal(true)
+                    end
+                end
+
+                return ext
+            end,
+        },
+
+        Filter = function(_, dst)
+            return dst:CheckExtension(_.ExcusedExtensions) and not fs.GetInfo(dst)
+        end,
 
         Source = NewList,
 
         Action = DoNothing,
     }
-
-    if extType == "function" then
-        local oldCodeLoc = codeLoc; codeLoc = LOC_DATA_EXP
-
-        ext = ext(getEnvironment(rule))
-
-        codeLoc = oldCodeLoc
-
-        extType = assertType({"string", "List", "table"}, ext, "extension expansion", 2)
-    end
-
-    if extType == "string" then
-        ext = vmake.Classes.List(true, { ext })
-    else
-        for i = 1, #ext do
-            assertType("string", ext[i], "extension #" .. i, 2)
-        end
-
-        if extType == "table" then
-            ext = vmake.Classes.List(true, ext)
-        else
-            ext:Seal(true)
-        end
-    end
-
-    return rule
 end
 
 --  Creates a rule which creates missing directories.
@@ -4792,8 +5216,6 @@ function ParseGccDependencies(dst, src, keepSrc)
     if not fs.GetInfo(dst) then
         --  Destination doesn't exist? It will be created anyway, so parsing the
         --  (leftover) dependency files will not help in any way.
-
-        MSG("Destination for dependencies \"", dst, "\" doesn't exist.")
 
         return keepSrc and vmake.Classes.List(false, { src }) or vmake.Classes.List()
     end
@@ -4894,3 +5316,444 @@ function ParseGccDependencies(dst, src, keepSrc)
 
     return deps
 end
+
+local function parseObjectExtension(path, header)
+    if header then
+        return tostring(path):match("^(.+)%.gch$")
+    else
+        local part1, part2 = tostring(path):match("^(.+)%.([^%.]+)%.o$")
+
+        if not part1 then
+            return nil, nil
+        end
+
+        local arch = GetArchitecture(part2)
+
+        if arch then
+            return part1, arch
+        else
+            return part1 .. "." .. part2, nil
+        end
+    end
+end
+
+local function checkObjectExtension(path, ext, header)
+    local part1, part2 = tostring(path):match(header and "^(.+)%.([^%.]+)%.gch$"
+                                                     or  "^(.+)%.([^%.]+)%.o$")
+
+    if not part1 then
+        return false
+    end
+
+    if GetArchitecture(part2) then
+        return part1:sub(-#ext - 1) == "." .. ext
+    else
+        return part2 == ext
+    end
+end
+
+local function sourceArchitecturalCode(_, dst)
+    local file, arch, src, res = parseObjectExtension(dst, false)
+
+    if arch then
+        if _.SourcesSubdirectory then
+            src = _.ArchitecturesDirectory + arch.Name + _.SourcesSubdirectory + Path(file):Skip(_.ObjectsDirectory)
+        else
+            src = _.ArchitecturesDirectory + arch.Name + Path(file):Skip(_.ObjectsDirectory)
+        end
+    else
+        if _.SourcesSubdirectory then
+            src = _.CommonDirectory + _.SourcesSubdirectory + Path(file):Skip(_.ObjectsDirectory)
+        else
+            src = _.CommonDirectory + Path(file):Skip(_.ObjectsDirectory)
+        end
+    end
+
+    if settMakeDeps then
+        res = ParseGccDependencies(dst, src, true) + List { dst:GetParent() }
+    else
+        res = List { src, dst:GetParent() }
+    end
+
+    if _.PrecompiledCppHeader then
+        res:Append(_.PrecompiledCppHeaderPath .. ".gch")
+    end
+
+    return res
+end
+
+local function sourceArchitecturalHeader(_, dst)
+    local file, src, res = parseObjectExtension(dst, true), nil
+    file = Path(file):Skip(_.PchDirectory)
+
+    if _.HeadersSubdirectory then
+        for arch in _.selArch:Hierarchy() do
+            local pth = _.ArchitecturesDirectory + arch.Name + _.HeadersSubdirectory + file
+
+            if fs.GetInfo(pth) then
+                src = pth
+
+                break
+            end
+        end
+
+        if not src then
+            src = _.comp.Directory + _.HeadersSubdirectory + file
+        end
+    else
+        for arch in _.selArch:Hierarchy() do
+            local pth = _.ArchitecturesDirectory + arch.Name + file
+
+            if fs.GetInfo(pth) then
+                src = pth
+
+                break
+            end
+        end
+
+        if not src then
+            src = _.comp.Directory + file
+        end
+    end
+
+    if settMakeDeps then
+        res = ParseGccDependencies(dst, src, true) + List { dst:GetParent() }
+    else
+        res = List { src, dst:GetParent() }
+    end
+
+    return res
+end
+
+local function generateManagedComponent(compType)
+    return function(name)
+        local comp = compType(name)({ })
+
+        local data = {
+            CommonDirectory = function(_) return _.comp.Directory end,
+            ArchitecturesDirectory = function(_) return _.comp.Directory end,
+
+            SourcesSubdirectory = false,
+            HeadersSubdirectory = false,
+
+            IncludeDirectories = function(_)
+                local res = List { }
+
+                if _.PrecompiledCHeader or _.PrecompiledCppHeader then
+                    res:Append(_.PchDirectory)
+                end
+
+                if _.HeadersSubdirectory then
+                    res:Append(_.comp.Directory + _.HeadersSubdirectory)
+
+                    for arch in _.selArch:Hierarchy() do
+                        res:Append(_.ArchitecturesDirectory + arch.Name + _.HeadersSubdirectory)
+                    end
+                else
+                    res:Append(_.comp.Directory)
+
+                    for arch in _.selArch:Hierarchy() do
+                        res:Append(_.ArchitecturesDirectory + arch.Name)
+                    end
+                end
+
+                return res
+            end,
+
+            Opts_Includes_Base = function(_)
+                return _.IncludeDirectories:Select(function(val) return "-I" .. tostring(val) end)
+            end,
+
+            Opts_Includes_Nasm_Base = function(_)
+                return _.Opts_Includes_Base:Select(function(dir) return dir .. "/" end)
+            end,
+
+            Opts_Includes      = function(_) return _.Opts_Includes_Base      end,
+            Opts_Includes_Nasm = function(_) return _.Opts_Includes_Nasm_Base end,
+
+            Opts_Libraries = function(_)
+                return _.Libraries:Select(function(val)
+                    return "-l" .. val
+                end)
+            end,
+
+            Libraries = List { },   --  Default to none.
+
+            ObjectsDirectory = function(_) return _.outDir + _.comp.Directory end,
+
+            Objects = function(_)
+                local comSrcDir = _.CommonDirectory
+
+                if _.SourcesSubdirectory then
+                    comSrcDir = comSrcDir + _.SourcesSubdirectory
+                end
+
+                local objects = fs.ListDir(comSrcDir)
+                    :Where(function(val) return val:EndsWith(_.SourceExtensions:Unpack()) end)
+                    :Select(function(val)
+                        return _.ObjectsDirectory + val:Skip(comSrcDir) .. ".o"
+                    end)
+
+                for arch in _.selArch:Hierarchy() do
+                    local arcSrcDir = _.ArchitecturesDirectory + arch.Name
+                    local suffix = "." .. arch.Name .. ".o"
+
+                    if _.SourcesSubdirectory then
+                        arcSrcDir = arcSrcDir + _.SourcesSubdirectory
+                    end
+
+                    if fs.GetInfo(arcSrcDir) then
+                        objects:AppendMany(fs.ListDir(arcSrcDir)
+                            :Where(function(val) return val:EndsWith(_.SourceExtensions:Unpack()) end)
+                            :Select(function(val)
+                                return _.ObjectsDirectory + val:Skip(arcSrcDir) .. suffix
+                            end))
+                    end
+                end
+
+                return objects
+            end,
+
+            PchDirectory = function(_) return _.outDir + _.comp.Directory + ".pch" end,
+
+            PrecompiledCHeaderPath   = function(_) return _.PchDirectory + _.PrecompiledCHeader   end,
+            PrecompiledCppHeaderPath = function(_) return _.PchDirectory + _.PrecompiledCppHeader end,
+
+            SourceExtensions = function(_)
+                return _.Languages:Select(function(lang)
+                    if lang == "C++" then
+                        return ".cpp"
+                    elseif lang == "C" then
+                        return ".c"
+                    elseif lang == "GAS" then
+                        return ".S"
+                    elseif lang == "NASM" then
+                        return ".asm"
+                    else
+                        error("vMake error: Unknown complex project/component language: " .. lang)
+                    end
+                end)
+            end,
+
+            HeaderExtensions = function(_)
+                local res = _.Languages:Select(function(lang)
+                    if lang == "C++" then
+                        return ".hpp"
+                    elseif lang == "C" then
+                        return ".h"
+                    elseif lang == "GAS" then
+                        return ".h" --  Yes, GAS uses C headers.
+                    elseif lang == "NASM" then
+                        return ".inc"
+                    else
+                        error("vMake error: Unknown complex project/component language: " .. lang)
+                    end
+                end)
+
+                res:AppendUnique(".inc")
+                --  Yes, `.inc` is kinda universal.
+
+                return res
+            end,
+
+            BinaryPath = function(_) return _.comp.Output:First() end,
+
+            BinaryDependencies = List { },
+
+            LinkerScript = false,
+        }
+
+        local langsProvided, targetProvided, excusesHeaders = false, false, false
+
+        return function(tab)
+            assertType("table", tab, name .. " table", 2)
+
+            for k, v in pairs(tab) do
+                if k == "Data" then
+                    for dk, dv in pairs(v) do
+                        data[dk] = dv
+                    end
+                elseif k == "Languages" then
+                    local langsType = assertType({"string", "List", "table"}, v, "Languages", 2)
+
+                    if langsType == "string" then
+                        v = List { v }
+                    elseif langsType == "table" then
+                        v = List(v)
+                    end
+
+                    langsProvided = v
+                elseif k == "Target" then
+                    assertType("string", v, "Target", 2)
+
+                    targetProvided = v
+                elseif k == "ExcuseHeaders" then
+                    assertType("boolean", v, "ExcuseHeaders", 2)
+
+                    excusesHeaders = v
+                elseif type(k) == "string" then
+                    comp[k] = v
+                end
+            end
+
+            if not langsProvided then
+                error("vMake error: Complex project/component needs `Languages` property.", 2)
+            end
+
+            if langsProvided:Contains("C") then
+                comp:AddMember(Rule "Compile C" {
+                    Filter = function(_, dst) return checkObjectExtension(dst, "c", false) end,
+
+                    Source = sourceArchitecturalCode,
+
+                    Action = function(_, dst, src)
+                        sh.silent(_.CC, _.Opts_C, "-x", "c", "-c", src[1], "-o", dst)
+                    end,
+                })
+
+                comp:AddMember(Rule "Precompile C Header" {
+                    Filter = function(_, dst) return checkObjectExtension(dst, "h", true) end,
+
+                    Source = sourceArchitecturalHeader,
+
+                    Action = function(_, dst, src)
+                        sh.silent(_.CC, _.Opts_C, "-x", "c-header", "-c", src[1], "-o", dst)
+                    end,
+                })
+            end
+
+            if langsProvided:Contains("C++") then
+                comp:AddMember(Rule "Compile C++" {
+                    Filter = function(_, dst) return checkObjectExtension(dst, "cpp", false) end,
+
+                    Source = sourceArchitecturalCode,
+
+                    Action = function(_, dst, src)
+                        sh.silent(_.CXX, _.Opts_CXX, "-x", "c++", "-c", src[1], "-o", dst)
+                    end,
+                })
+
+                comp:AddMember(Rule "Precompile C++ Header" {
+                    Filter = function(_, dst) return checkObjectExtension(dst, "hpp", true) end,
+
+                    Source = sourceArchitecturalHeader,
+
+                    Action = function(_, dst, src)
+                        sh.silent(_.CXX, _.Opts_CXX, "-x", "c++-header", "-c", src[1], "-o", dst)
+                    end,
+                })
+            end
+
+            if langsProvided:Contains("GAS") then
+                comp:AddMember(Rule "Assemble w/ GAS" {
+                    Filter = function(_, dst) return checkObjectExtension(dst, "S", false) end,
+
+                    Source = sourceArchitecturalCode,
+
+                    Action = function(_, dst, src)
+                        sh.silent(_.GAS, _.Opts_GAS, "-x", "assembler-with-cpp", "-c", src[1], "-o", dst)
+                    end,
+                })
+            end
+
+            if langsProvided:Contains("NASM") then
+                comp:AddMember(Rule "Assemble w/ NASM" {
+                    Filter = function(_, dst) return checkObjectExtension(dst, "asm", false) end,
+
+                    Source = sourceArchitecturalCode,
+
+                    Action = function(_, dst, src)
+                        sh.silent(_.AS, _.Opts_NASM, src[1], "-o", dst)
+                    end,
+                })
+            end
+
+            if not targetProvided then
+                targetProvided = "Executable"
+
+                MSG("No Target provided for managed project/component \"", name, "\"; assuming 'Executable'.")
+            end
+
+            if targetProvided == "Executable" then
+                comp:AddMember(Rule "Link Executable" {
+                    Filter = function(_, dst) return _.BinaryPath end,
+
+                    Source = function(_, dst)
+                        if _.LinkerScript then
+                            return _.Objects + List { dst:GetParent(), _.LinkerScript } + _.BinaryDependencies
+                        else
+                            return _.Objects + List { dst:GetParent() } + _.BinaryDependencies
+                        end
+                    end,
+
+                    Action = function(_, dst, src)
+                        if _.LinkerScript then
+                            sh.silent(_.LD, _.Opts_LD, "-T", _.LinkerScript, "-o", dst, _.Objects, _.Opts_Libraries)
+                        else
+                            sh.silent(_.LD, _.Opts_LD, "-o", dst, _.Objects, _.Opts_Libraries)
+                        end
+                    end,
+                })
+            elseif targetProvided == "Dynamic Library" then
+                comp:AddMember(Rule "Link Dynamic Library" {
+                    Filter = function(_, dst) return _.BinaryPath end,
+
+                    Source = function(_, dst)
+                        if _.LinkerScript then
+                            return _.Objects + List { dst:GetParent(), _.LinkerScript } + _.BinaryDependencies
+                        else
+                            return _.Objects + List { dst:GetParent() } + _.BinaryDependencies
+                        end
+                    end,
+
+                    Action = function(_, dst, src)
+                        if _.LinkerScript then
+                            sh.silent(_.LD, "-shared", _.Opts_LD, "-T", _.LinkerScript, "-o", dst, _.Objects, _.Opts_Libraries)
+                        else
+                            sh.silent(_.LD, "-shared", _.Opts_LD, "-o", dst, _.Objects, _.Opts_Libraries)
+                        end
+                    end,
+                })
+            elseif targetProvided == "Static Library" then
+                comp:AddMember(Rule "Archive Objects" {
+                    Filter = function(_, dst) return _.BinaryPath end,
+
+                    Source = function(_, dst)
+                        return _.Objects + List { dst:GetParent() } + _.BinaryDependencies 
+                    end,
+
+                    Action = function(_, dst, src)
+                        sh.silent(_.AR, _.Opts_AR, dst, _.Objects)
+                    end,
+                })
+            elseif targetProvided ~= "Custom" then
+                error("vMake error: Unknown complex project/component target: " .. tostring(targetProvided)
+                    .. "; Supported values: 'Executable', 'Dynamic Library', 'Static Library', and 'Custom'")
+            end
+
+            if excusesHeaders then
+                comp:AddMember(ExcuseMissingFilesRule(function(_)
+                    return _.HeaderExtensions:Select(function(ext)
+                        return ext:sub(1)
+                        --  Skips the dot.
+                    end)
+                end))
+            end
+
+            data.Languages = langsProvided
+            data.Target = targetProvided
+            data.ExcusesHeaders = excusesHeaders
+
+            comp.Data = data
+
+            for i = 1, #tab do
+                comp:AddMember(tab[i])
+            end
+
+            return comp
+        end
+    end
+end
+
+ManagedProject = generateManagedComponent(Project)
+ManagedComponent = generateManagedComponent(Component)
