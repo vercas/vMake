@@ -51,9 +51,17 @@ if arg then
     end
 end
 
+local ______f, _____________t = function()return function()end end, {nil,
+   [false]  = 'Lua 5.1',
+   [true]   = 'Lua 5.2',
+   [1/'-0'] = 'Lua 5.3',
+   [1]      = 'LuaJIT' }
+local luaVersion = _____________t[1] or _____________t[1/0] or _____________t[______f()==______f()]
+--  Taken from http://lua-users.org/lists/lua-l/2016-05/msg00297.html
+
 local vmake, vmake__call, getEnvironment = {
-    Version = "1.6.0",
-    VersionNumber = 1006000,
+    Version = "1.7.0",
+    VersionNumber = 1007000,
 
     Debug = false,
     Silent = false,
@@ -86,7 +94,7 @@ local LOC_CMDO_HAN = 5
 local curWorkItem = nil
 
 vmake.Description = "vMake v" .. vmake.Version .. " [" .. vmake.VersionNumber
-.. "] (c) 2016 Alexandru-Mihai Maftei, running under " .. _VERSION
+.. "] (c) 2016 Alexandru-Mihai Maftei, running under " .. luaVersion
 
 pcall(require, "lfs")
 
@@ -133,7 +141,7 @@ end
 
 function OutputDirectory(val, forbidFunc)
     if outDir then
-        error("", 2)
+        error("vMake error: Output directory is already defined.", 2)
     end
 
     local allowedTypes = {"string", "Path", "function"}
@@ -185,16 +193,6 @@ function DirPath(val)
     end
 
     return vmake.Classes.Path(val, "d")
-end
-
-function List(tab)
-    assertType("table", tab, "list array", 2)
-
-    if not table.isarray(tab) then
-        error("vMake error: List must be initialized with a pure array table.", 2)
-    end
-
-    return vmake.Classes.List(false, tab)
 end
 
 function Configuration(name)
@@ -686,100 +684,152 @@ local function queuefunc(fnc, functionlist, donefunctions)
     donefunctions[fnc] = true
 end
 
-function vcall(fnc, ...)
-    local endData
+function GatherEndState(err)
+    local functionlist, donefunctions = {}, {}
 
-    local ret = {xpcall(fnc, function(err)
-        local functionlist, donefunctions = {}, {}
+    local stack, thesaurus = {}, {}
 
-        local stack, thesaurus = {}, {}
+    local i = 2
 
-        local i = 2
+    while true do
+        local info = debug.getinfo(i)
+
+        if not info then
+            break
+        end
+
+        stack[#stack+1] = info
+        info._stackpos = i
+
+        if info.func then
+            thesaurus[info.func] = info
+            queuefunc(info.func, functionlist, donefunctions)
+            info.func = tostring(info.func)
+        end
+
+        --if info.what == "Lua" then
+        info._locals = {}
+        local locals = info._locals
+
+        local j = 1
 
         while true do
-            local info = debug.getinfo(i)
+            local n, v = debug.getlocal(i, j)
 
-            if not info then
-                break
+            if not n then break end
+
+            locals[#locals+1] = {name=n,value=v}
+
+            if type(v) == "function" then
+                queuefunc(v, functionlist, donefunctions)
+                locals[#locals].value = tostring(locals[#locals].value)
             end
 
-            stack[#stack+1] = info
-            info._stackpos = i
-
-            if info.func then
-                thesaurus[info.func] = info
-                queuefunc(info.func, functionlist, donefunctions)
-                info.func = tostring(info.func)
-            end
-
-            --if info.what == "Lua" then
-            info._locals = {}
-            local locals = info._locals
-
-            local j = 1
-
-            while true do
-                local n, v = debug.getlocal(i, j)
-
-                if not n then break end
-
-                locals[#locals+1] = {name=n,value=v}
-
-                if type(v) == "function" then
-                    queuefunc(v, functionlist, donefunctions)
-                    locals[#locals].value = tostring(locals[#locals].value)
-                end
-
-                j = j + 1
-            end
-            --end
-
-            i = i + 1
+            j = j + 1
         end
+        --end
 
-        for i = 1, #functionlist do
-            local fnc = functionlist[i]
-
-            local info
-
-            if thesaurus[fnc] then
-                info = thesaurus[fnc]
-            else
-                info = debug.getinfo(fnc)
-                thesaurus[fnc] = info
-            end
-
-            local ups = {}
-            info._upvalues = ups
-
-            for j = 1, info.nups do
-                local n, v = debug.getupvalue(fnc, j)
-
-                ups[#ups+1] = {name=n,value=v}
-
-                if type(v) == "function" then
-                    queuefunc(v, functionlist, donefunctions)
-                    ups[#ups].value = tostring(ups[#ups].value)
-                end
-            end
-        end
-
-        local newthesaurus = {}
-
-        for k, v in pairs(thesaurus) do
-            newthesaurus[tostring(k)] = v
-        end
-
-        endData = { Stack = stack, Thesaurus = newthesaurus, Error = err, ShortTrace = debug.traceback(nil, 2), Print = printEndData }
-    end, ...)}
-
-    if endData then
-        endData.Return = ret
-    else
-        endData = { Return = ret }
+        i = i + 1
     end
 
-    return endData
+    for i = 1, #functionlist do
+        local fnc = functionlist[i]
+
+        local info
+
+        if thesaurus[fnc] then
+            info = thesaurus[fnc]
+        else
+            info = debug.getinfo(fnc)
+            thesaurus[fnc] = info
+        end
+
+        local ups = {}
+        info._upvalues = ups
+
+        for j = 1, info.nups do
+            local n, v = debug.getupvalue(fnc, j)
+
+            ups[#ups+1] = {name=n,value=v}
+
+            if type(v) == "function" then
+                queuefunc(v, functionlist, donefunctions)
+                ups[#ups].value = tostring(ups[#ups].value)
+            end
+        end
+    end
+
+    local newthesaurus = {}
+
+    for k, v in pairs(thesaurus) do
+        newthesaurus[tostring(k)] = v
+    end
+
+    return { Stack = stack, Thesaurus = newthesaurus, Error = err, ShortTrace = debug.traceback(nil, 2), Print = printEndData }
+end
+
+do
+    --  A small workaround around old xpcall versions.
+
+    local foo = 1
+
+    xpcall(
+        function(arg)
+            if arg == "bar" then
+                foo = 2
+            else
+                foo = 0
+            end
+        end,
+        function(err)
+            io.stderr:write("This really shouldn't have happened:\n", err, "\n")
+            os.exit(-100)
+        end,
+        "bar")
+
+    assert(foo ~= 1, "'foo' should have changed!")
+
+    if foo == 0 then
+        MSG("xpcall doesn't seem to support passing arguments; working around it.")
+
+        function vcall(inner_function, ...)
+            local wrapped_args = {...}
+
+            local function wrapper_function()
+                return inner_function(unpack(wrapped_args))
+            end
+
+            local ret = {xpcall(wrapper_function, GatherEndState)}
+
+            if ret[1] then
+                --  Call succeeded.
+
+                table.remove(ret, 1)
+
+                return { Return = ret }
+            else
+                --  Call failed!
+
+                return ret[2]
+            end
+        end
+    else
+        function vcall(fnc, ...)
+            local ret = {xpcall(fnc, GatherEndState, ...)}
+
+            if ret[1] then
+                --  Call succeeded.
+
+                table.remove(ret, 1)
+
+                return { Return = ret }
+            else
+                --  Call failed!
+
+                return ret[2]
+            end
+        end
+    end
 end
 
 function assertTypeEx(tname, valType, val, vname, errlvl)
@@ -963,11 +1013,7 @@ function string.iteratesplit(s, pattern, plain, n)
             local last = s:sub(i1)
             i1 = nil
 
-            if last ~= '' then
-                return last
-            end
-
-            return
+            return last
         else
             cnt = cnt + 1
 
@@ -5132,6 +5178,561 @@ _G.vmake = setmetatable({
 })
 
 --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
+--  OS Environment Library
+--  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
+
+local osenvmeta = {
+    __metatable = "Still noooo."
+}
+
+function osenvmeta.__index(self, key)
+    return os.getenv(key)
+end
+
+env = setmetatable({ }, osenvmeta)
+
+--  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
+--  List Utilities
+--  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
+
+local bracketPairs = { ["["] = "]", ["]"] = "["
+                    ,  ["("] = ")", [")"] = "("
+                    ,  ["{"] = "}", ["}"] = "{" }
+
+local function parseListElement(line, linelen, i)
+    local res = {}
+
+    local inEscape, inSQ, inDQ, afterSpecial = false, false, false, false
+    local parenStack, quoteStart = {}
+
+    local firstChar = line:sub(i, i)
+    local firstCharSpecial = string.find("!@$", firstChar, 1, true)
+
+    if not firstCharSpecial then
+        firstChar = false
+    end
+
+    while i <= linelen do
+        local c = line:sub(i, i)
+
+        if not c then break end
+
+        if afterSpecial then
+            --  After a special character, only an opening square bracket or an identifier may follow.
+
+            if c == "[" then
+                if afterSpecial ~= "!" then
+                    parenStack[#parenStack + 1] = c
+                else
+                    return table.concat(res), i, firstChar, string.format("Exclamation mark at character #%d must be followed directly by an identifier, not opening square brackets", i - 1)
+                end
+            elseif c:match("([_a-zA-Z])") then
+                --  Okay, this is an identifier. Means a period must be added before it.
+
+                if afterSpecial ~= "!" then
+                    res[#res + 1] = "."
+                end
+            else
+                --  This ought to be wrong.
+
+                if afterSpecial == "!" then
+                    return table.concat(res), i, firstChar, string.format("Special character '%s' at #%d must be followed directly by an identifier", afterSpecial, i - 1)
+                else
+                    return table.concat(res), i, firstChar, string.format("Special character '%s' at #%d must be followed directly by an identifier or opening square brackets", afterSpecial, i - 1)
+                end
+            end
+            
+            res[#res + 1] = c
+
+            afterSpecial = false
+        elseif inEscape then
+            if c == 'n' then
+                res[#res + 1] = '\n'
+            elseif c == 't' then
+                res[#res + 1] = '\t'
+            elseif c == 'b' then
+                res[#res + 1] = '\b'
+            else
+                res[#res + 1] = c
+            end
+
+            inEscape = false
+        elseif quoteStart then
+            if c == '\\' then
+                inEscape = true
+            elseif inSQ and c == "'" then
+                quoteStart = nil
+                inSQ = false
+            elseif inDQ and c == '"' then
+                quoteStart = nil
+                inDQ = false
+            else
+                res[#res + 1] = c
+            end
+        else
+            if c == '\\' then
+                if firstCharSpecial then
+                    --  Escape sequences can only show up inside quotes if the first character is special.
+
+                    return table.concat(res), i, firstChar, string.format("Escape sequences in special elements can only appear within quotes (strings); backslash at character #%d is invalid", i)
+                else
+                    inEscape = true
+                end
+            elseif c == '"' then
+                quoteStart = i
+                inDQ = true
+            elseif c == "'" then
+                quoteStart = i
+                inSQ = true
+            elseif string.find(" \t\n", c, 1, true) and #parenStack == 0 then
+                --  This is clearly an element separator.
+
+                i = i - 1
+
+                break
+            elseif firstCharSpecial then
+                if string.find("([{", c, 1, true) then
+                    parenStack[#parenStack + 1] = c
+                    res[#res + 1] = c
+                elseif string.find(")]}", c, 1, true) then
+                    if parenStack[#parenStack] == bracketPairs[c] then
+                        parenStack[#parenStack] = nil
+                        res[#res + 1] = c
+                    elseif #parenStack == 0 then
+                        --  Stray bracket.
+
+                        return table.concat(res), i, firstChar, string.format("Stray closing bracket '%s' at character #%d", c, i)
+                    else
+                        --  Unmatching bracket.
+
+                        return table.concat(res), i, firstChar, string.format("Unexpected closing bracket '%s' at character #%d; expected '%s'", c, i, parenStack[#parenStack])
+                    end
+                elseif c == "@" then
+                    res[#res + 1] = " _"
+                    afterSpecial = c
+                elseif c == "$" then
+                    res[#res + 1] = " env"
+                    afterSpecial = c
+                elseif c == "!" then
+                    res[#res + 1] = " "
+                    afterSpecial = c
+                else
+                    res[#res + 1] = c
+                end
+            else
+                res[#res + 1] = c
+            end
+        end
+
+        i = i + 1
+    end
+
+    res = table.concat(res)
+
+    if inEscape then
+        return res, i, firstChar, "Unfinished escape sequence at character #" .. (i - 1)
+    end
+
+    if inSQ then
+        return res, i, firstChar, "Unpaired single quotes at character #" .. quoteStart
+    end
+
+    if inDQ then
+        return res, i, firstChar, "Unpaired double quotes at character #" .. quoteStart
+    end
+
+    if #parenStack > 0 then
+        return res, i, firstChar, "Missing closing brackets for the following opened brackets: " .. table.concat(parenStack)
+    end
+
+    return res, i, firstChar
+end
+
+local function parseListInner(line, linelen)
+    local res, i, special, err = nil, 1
+    local arr = {}
+
+    while i <= linelen do
+        local c, oldPos = line:sub(i, i), i
+
+        if not string.find(" \t\n", c, 1, true) then
+            --  Whitespaces are completely ignored between elements.
+
+            res, i, special, err = parseListElement(line, linelen, i)
+
+            if res ~= nil then
+                arr[#arr + 1] = { Text = res, Special = special, Position = oldPos }
+            end
+
+            if err then
+                return arr, err, i
+            end
+        end
+        
+        i = i + 1
+    end
+
+    return arr
+end
+
+local function parseList(str)
+    return parseListInner(str, #str)
+end
+
+do
+    local listCache = {}
+    --  Note, this caches the list creator chunks, not the lists themselves.
+
+    function List(tab)
+        local tabType = assertType({"string", "table"}, tab, "list array", 2)
+
+        if listCache[tab] then
+            return listCache[tab]()
+        end
+
+        if tabType == "table" then
+            if not table.isarray(tab) then
+                error("vMake error: List must be initialized with a pure array table.", 2)
+            end
+
+            local res = vmake.Classes.List(false, tab)
+
+            listCache[tab] = res
+
+            return res
+        else
+            local lst, err = parseList(tab)
+
+            if err then
+                error("vMake error: List syntax error: " .. err, 2)
+            end
+
+            local template, values = { "return List {\n" }, { }
+
+            for i = 1, #lst do
+                values[i] = lst[i].Text
+
+                if lst[i].Special then
+                    if lst[i].Special == "@" then
+                        error("vMake error: List semantics error: Cannot use special character '@' in this context.", 2)
+                    end
+
+                    if i == 1 then
+                        template[2] = "%s\n"
+                    else
+                        template[i + 1] = ", %s\n"
+                    end
+                else
+                    if i == 1 then
+                        template[2] = "%q\n"
+                    else
+                        template[i + 1] = ", %q\n"
+                    end
+                end
+            end
+
+            template[#template + 1] = "}\n"
+
+            template = table.concat(template):format(unpack(values))
+
+            --  Okay, that code now needs to be executed.
+
+            local res, err = loadstring(template, "temporary list creator")
+
+            if res then
+                listCache[tab] = res
+
+                return res()
+            end
+
+            local endState = GatherEndState(err)
+
+            io.stderr:write("Failed to parse temporary list creator:\n"
+                , template
+                , endState:Print())
+
+            os.exit(4)
+        end
+    end
+end
+
+--  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
+--  Lambda Utilities
+--  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
+
+function L(code)
+    assertType("string", code, "lambda code", 2)
+
+    local params, expression = code:match("^%s*|(.-)|(.+)$")
+
+    if not params or not expression then
+        error("vMake error: Lambda code should be in the format \"|arg1, arg2, ...| expression\".", 2)
+    end
+
+    return loadstring(
+([[return function(%s)
+    return %s
+end]]):format(params, expression)
+        , "lambda")()
+end
+
+local function lambdaShortcut(name, params, filter)
+    assertType("string", name, "lambda shortcut name", 2)
+    assertType("string", params, "lambda shortcut parameters", 2)
+    assertType({"nil", "function"}, filter, "lambda shortcut filter", 2)
+
+    local anonFuncTemplate =
+([[return function(%s)
+    return %%s
+end
+]]):format(params)
+
+    local cache = {}
+
+    if filter then
+        local chunkName = "filtered " .. name .. " lambda"
+        local expName = chunkName .. " expression"
+
+        return function(unfiltered)
+            if unfiltered == nil then
+                error("vMake error: Must pass non-nil value to " .. name .. " lambda generator.", 2)
+            end
+
+            if cache[unfiltered] then
+                return cache[unfiltered]
+            end
+
+            local expression, endState = vcall(filter, unfiltered)
+
+            if expression.Return then
+                expression = expression.Return[1]
+
+                assertType("string", expression, expName, 2)
+                expression = anonFuncTemplate:format(expression)
+
+                local res, err = loadstring(expression, chunkName)
+
+                if res then
+                    res = res()
+                    cache[unfiltered] = res
+
+                    return res
+                end
+
+                endState = GatherEndState(err)
+            else
+                endState = expression
+
+                expression = ''
+            end
+
+            io.stderr:write("Failed to parse filtered " .. name .. " lambda:\n"
+                , expression
+                , "UNFILTERED:\n", unfiltered, "\n"
+                , endState:Print())
+
+            os.exit(3)
+        end
+    else
+        return function(expression)
+            assertType("string", expression, expName, 2)
+
+            if cache[unfiltered] then
+                return cache[unfiltered]
+            end
+
+            expression = anonFuncTemplate:format(expression)
+            local res, err = loadstring(expression, chunkName)
+
+            if res then
+                res = res()
+                cache[unfiltered] = res
+
+                return res
+            end
+
+            local endState = GatherEndState(err)
+
+            io.stderr:write("Failed to parse " .. name .. " lambda:\n"
+                , expression
+                , endState:Print())
+
+            os.exit(3)
+        end
+    end
+end
+
+DAT = lambdaShortcut("data", "_", function(exp)
+    assertType("string", exp, "data lambda expression", 3)
+
+    local res, lastSep, lastWasEmpty = {}, nil, false
+
+    for chunk, sep in string.iteratesplit(exp, '[@$]') do
+        if lastSep then
+            if lastWasEmpty then
+                res[#res + 1] = lastSep
+                res[#res + 1] = chunk
+
+                lastWasEmpty = false
+            else
+                if #chunk == 0 then
+                    lastWasEmpty = true
+                else
+                    if chunk:sub(1, 1) == '[' then
+                        if lastSep == '@' then
+                            res[#res + 1] = " _"
+                        else
+                            res[#res + 1] = " env"
+                        end
+                    elseif chunk:match("^([_a-zA-Z])") then
+                        if lastSep == '@' then
+                            res[#res + 1] = " _."
+                        else
+                            res[#res + 1] = " env."
+                        end
+                    else
+                        error("Data lambda syntax error: '" .. lastSep .. "' should directly preceed an identifier or an array index (in square brackets).")
+                    end
+
+                    res[#res + 1] = chunk
+                end
+            end
+        elseif #chunk > 0 then
+            res[#res + 1] = chunk
+        end
+
+        lastSep = sep
+    end
+
+    if lastWasEmpty then
+        error("Data lambda syntax error: '" .. exp:sub(-1) .. "' was encountered at the end of the code; it should directly preceed an identifier or an array index (in square brackets).")
+    end
+
+    return table.concat(res)
+end)
+
+FLT = lambdaShortcut("rule filter", "_, dst", function(exp)
+    assertType("string", exp, "rule filter lambda expression", 3)
+
+    local res, lastSep, lastWasEmpty = {}, nil, false
+
+    for chunk, sep in string.iteratesplit(exp, '[@$]') do
+        if lastSep then
+            if lastWasEmpty then
+                res[#res + 1] = lastSep
+                res[#res + 1] = chunk
+
+                lastWasEmpty = false
+            else
+                if #chunk == 0 then
+                    lastWasEmpty = true
+                else
+                    if chunk:sub(1, 1) == '[' then
+                        if lastSep == '@' then
+                            res[#res + 1] = " _"
+                        else
+                            res[#res + 1] = " env"
+                        end
+                    elseif chunk:match("^([_a-zA-Z])") then
+                        if lastSep == '@' then
+                            res[#res + 1] = " _."
+                        else
+                            res[#res + 1] = " env."
+                        end
+                    else
+                        error("Rule filter lambda syntax error: '" .. lastSep .. "' should directly preceed an identifier or an array index (in square brackets).")
+                    end
+
+                    res[#res + 1] = chunk
+                end
+            end
+        elseif #chunk > 0 then
+            res[#res + 1] = chunk
+        end
+
+        lastSep = sep
+    end
+
+    if lastWasEmpty then
+        error("Rule filter lambda syntax error: '" .. exp:sub(-1) .. "' was encountered at the end of the code; it should directly preceed an identifier or an array index (in square brackets).")
+    end
+
+    return table.concat(res)
+end)
+
+LST = lambdaShortcut("data list", "_", function(exp)
+    assertType("string", exp, "data list lambda expression", 3)
+
+    local lst, err = parseList(exp)
+
+    if err then
+        error("Data list syntax error: " .. err, 3)
+    end
+
+    local template, values = { "List {\n" }, { }
+
+    for i = 1, #lst do
+        values[i] = lst[i].Text
+
+        if lst[i].Special then
+            if i == 1 then
+                template[2] = "%s\n"
+            else
+                template[i + 1] = ", %s\n"
+            end
+        else
+            if i == 1 then
+                template[2] = "%q\n"
+            else
+                template[i + 1] = ", %q\n"
+            end
+        end
+    end
+
+    template[#template + 1] = "}\n"
+
+    return table.concat(template):format(unpack(values))
+end)
+
+ACT = lambdaShortcut("rule action", "_, dst, src", function(exp)
+    assertType("string", exp, "rule action lambda expression", 3)
+
+    local lst, err = parseList(exp)
+
+    if err then
+        error("Rule action lambda syntax error: " .. err, 3)
+    end
+
+    if #lst == 0 then
+        error("Rule action lambda mustn't be empty.", 3)
+    end
+
+    local template, values = { "sh.silent(\n" }, { }
+
+    for i = 1, #lst do
+        values[i] = lst[i].Text
+
+        if lst[i].Special then
+            if i == 1 then
+                template[2] = "%s\n"
+            else
+                template[i + 1] = ", %s\n"
+            end
+        else
+            if i == 1 then
+                template[2] = "%q\n"
+            else
+                template[i + 1] = ", %q\n"
+            end
+        end
+    end
+
+    template[#template + 1] = ")\n"
+
+    return table.concat(template):format(unpack(values))
+end)
+
+--  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
 --  Some common templates
 --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
 
@@ -5430,8 +6031,8 @@ local function generateManagedComponent(compType)
         local comp = compType(name)({ })
 
         local data = {
-            CommonDirectory = function(_) return _.comp.Directory end,
-            ArchitecturesDirectory = function(_) return _.comp.Directory end,
+            CommonDirectory = DAT "@comp.Directory",
+            ArchitecturesDirectory = DAT "@comp.Directory",
 
             SourcesSubdirectory = false,
             HeadersSubdirectory = false,
@@ -5468,8 +6069,8 @@ local function generateManagedComponent(compType)
                 return _.Opts_Includes_Base:Select(function(dir) return dir .. "/" end)
             end,
 
-            Opts_Includes      = function(_) return _.Opts_Includes_Base      end,
-            Opts_Includes_Nasm = function(_) return _.Opts_Includes_Nasm_Base end,
+            Opts_Includes      = DAT "@Opts_Includes_Base",
+            Opts_Includes_Nasm = DAT "@Opts_Includes_Nasm_Base",
 
             Opts_Libraries = function(_)
                 return _.Libraries:Select(function(val)
@@ -5479,7 +6080,7 @@ local function generateManagedComponent(compType)
 
             Libraries = List { },   --  Default to none.
 
-            ObjectsDirectory = function(_) return _.outDir + _.comp.Directory end,
+            ObjectsDirectory = DAT "@outDir + @comp.Directory",
 
             Objects = function(_)
                 local comSrcDir = _.CommonDirectory
@@ -5514,10 +6115,10 @@ local function generateManagedComponent(compType)
                 return objects
             end,
 
-            PchDirectory = function(_) return _.outDir + _.comp.Directory + ".pch" end,
+            PchDirectory = DAT "@outDir + @comp.Directory + '.pch'",
 
-            PrecompiledCHeaderPath   = function(_) return _.PchDirectory + _.PrecompiledCHeader   end,
-            PrecompiledCppHeaderPath = function(_) return _.PchDirectory + _.PrecompiledCppHeader end,
+            PrecompiledCHeaderPath   = DAT "@PchDirectory + @PrecompiledCHeader",
+            PrecompiledCppHeaderPath = DAT "@PchDirectory + @PrecompiledCppHeader",
 
             SourceExtensions = function(_)
                 return _.Languages:Select(function(lang)
@@ -5556,7 +6157,7 @@ local function generateManagedComponent(compType)
                 return res
             end,
 
-            BinaryPath = function(_) return _.comp.Output:First() end,
+            BinaryPath = DAT "@comp.Output:First()",
 
             BinaryDependencies = List { },
 
@@ -5606,9 +6207,7 @@ local function generateManagedComponent(compType)
 
                     Source = sourceArchitecturalCode,
 
-                    Action = function(_, dst, src)
-                        sh.silent(_.CC, _.Opts_C, "-x", "c", "-c", src[1], "-o", dst)
-                    end,
+                    Action = ACT "@CC @Opts_C -x c -c !src[1] -o !dst",
                 })
 
                 comp:AddMember(Rule "Precompile C Header" {
@@ -5616,9 +6215,7 @@ local function generateManagedComponent(compType)
 
                     Source = sourceArchitecturalHeader,
 
-                    Action = function(_, dst, src)
-                        sh.silent(_.CC, _.Opts_C, "-x", "c-header", "-c", src[1], "-o", dst)
-                    end,
+                    Action = ACT "@CC @Opts_C -x c-header -c !src[1] -o !dst",
                 })
             end
 
@@ -5628,9 +6225,7 @@ local function generateManagedComponent(compType)
 
                     Source = sourceArchitecturalCode,
 
-                    Action = function(_, dst, src)
-                        sh.silent(_.CXX, _.Opts_CXX, "-x", "c++", "-c", src[1], "-o", dst)
-                    end,
+                    Action = ACT "@CXX @Opts_CXX -x c++ -c !src[1] -o !dst",
                 })
 
                 comp:AddMember(Rule "Precompile C++ Header" {
@@ -5638,9 +6233,7 @@ local function generateManagedComponent(compType)
 
                     Source = sourceArchitecturalHeader,
 
-                    Action = function(_, dst, src)
-                        sh.silent(_.CXX, _.Opts_CXX, "-x", "c++-header", "-c", src[1], "-o", dst)
-                    end,
+                    Action = ACT "@CXX @Opts_CXX -x c++-header -c !src[1] -o !dst",
                 })
             end
 
@@ -5650,9 +6243,7 @@ local function generateManagedComponent(compType)
 
                     Source = sourceArchitecturalCode,
 
-                    Action = function(_, dst, src)
-                        sh.silent(_.GAS, _.Opts_GAS, "-x", "assembler-with-cpp", "-c", src[1], "-o", dst)
-                    end,
+                    Action = ACT "@GAS @Opts_GAS -x assembler-with-cpp -c !src[1] -o !dst",
                 })
             end
 
@@ -5662,9 +6253,7 @@ local function generateManagedComponent(compType)
 
                     Source = sourceArchitecturalCode,
 
-                    Action = function(_, dst, src)
-                        sh.silent(_.AS, _.Opts_NASM, src[1], "-o", dst)
-                    end,
+                    Action = ACT "@AS @Opts_NASM !src[1] -o !dst",
                 })
             end
 
@@ -5722,9 +6311,7 @@ local function generateManagedComponent(compType)
                         return _.Objects + List { dst:GetParent() } + _.BinaryDependencies 
                     end,
 
-                    Action = function(_, dst, src)
-                        sh.silent(_.AR, _.Opts_AR, dst, _.Objects)
-                    end,
+                    Action = ACT "@AR @Opts_AR !dst @Objects",
                 })
             elseif targetProvided ~= "Custom" then
                 error("vMake error: Unknown complex project/component target: " .. tostring(targetProvided)
