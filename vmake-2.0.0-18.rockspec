@@ -3,7 +3,7 @@ version = "2.0.0-18"
 
 source = {
     url = "git://github.com/vercas/vMake",
-    tag = "v2.0.0",
+    tag = "v2.0.0-5.1",
 }
 
 description = {
