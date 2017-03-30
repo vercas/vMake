@@ -59,7 +59,7 @@ local ______f, _____________t = function()return function()end end, {nil,
 local luaVersion = _____________t[1] or _____________t[1/0] or _____________t[______f()==______f()]
 --  Taken from http://lua-users.org/lists/lua-l/2016-05/msg00297.html
 
-local vmake, vmake__call, getEnvironment = {
+local vmake, vmake__call, getEnvironment, withEnvironment = {
     Version = "1.7.0",
     VersionNumber = 1007000,
 
@@ -87,6 +87,10 @@ local vmake, vmake__call, getEnvironment = {
     HasGnuParallel = false,
 }
 
+local baseEnvironment = {
+    ["_G"] = _G,    --  No need to hide this.
+}
+
 local codeLoc = 0
 local LOC_DATA_EXP, LOC_RULE_SRC, LOC_RULE_FLT, LOC_RULE_ACT = 1, 2, 3, 4
 local LOC_CMDO_HAN = 5
@@ -99,6 +103,8 @@ vmake.Description = "vMake v" .. vmake.Version .. " [" .. vmake.VersionNumber
 pcall(require, "lfs")
 
 SH_AND, SH_SEP, SH_RAW = {}, {}, {}
+
+baseEnvironment.SH_AND, baseEnvironment.SH_SEP, baseEnvironment.SH_RAW = SH_AND, SH_SEP, SH_RAW
 
 --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
 --  Top-level Declarations
@@ -174,6 +180,7 @@ function Path(val, type)
 
     return vmake.Classes.Path(val, type or 'U')
 end
+baseEnvironment.Path = Path
 
 function FilePath(val)
     assertType("string", val, "path", 2)
@@ -184,6 +191,7 @@ function FilePath(val)
 
     return vmake.Classes.Path(val, "f")
 end
+baseEnvironment.FilePath = FilePath
 
 function DirPath(val)
     assertType("string", val, "path", 2)
@@ -194,6 +202,7 @@ function DirPath(val)
 
     return vmake.Classes.Path(val, "d")
 end
+baseEnvironment.DirPath = DirPath
 
 function Configuration(name)
     checkName(name, "configuration", 2)
@@ -225,6 +234,7 @@ function GetConfiguration(name)
 
     return configs[name]
 end
+baseEnvironment.GetConfiguration = baseEnvironment.GetConfiguration
 
 function Architecture(name)
     checkName(name, "architecture", 2)
@@ -256,6 +266,7 @@ function GetArchitecture(name)
 
     return archs[name]
 end
+baseEnvironment.GetArchitecture = baseEnvironment.GetArchitecture
 
 local function spawnProjectFunction(pType, tName, topLevel)
     return function(name)
@@ -381,6 +392,8 @@ function typeEx(val)
         end
     end
 end
+baseEnvironment.type = baseEnvironment.typeEx
+--  Note the alias!
 
 local function escapeForShell(s)
     if #s < 1 then
@@ -413,6 +426,7 @@ function MSG(...)
 
     print(table.concat(items))
 end
+baseEnvironment.MSG = MSG
 
 local function prettyString(val)
     if type(val) == "string" then
@@ -832,6 +846,102 @@ do
     end
 end
 
+if setfenv then
+    error("TODO")
+else
+    local cache = {}
+
+    function getfenv(f)
+        local i, name, val = 1
+
+        repeat
+            name, val = debug.getupvalue(f, i)
+
+            if name == "_ENV" then
+                return val
+            end
+
+            i = i + 1
+        until not name
+
+        return nil
+    end
+
+    function withEnvironment(f, env)
+        if cache[f] and (cache[f][env] or cache[f][true]) then
+            return cache[f][env] or cache[f][true]
+        end
+
+        if not getfenv(f) then
+            if cache[f] then
+                cache[f][true] = f
+            else
+                cache[f] = { [true] = f }
+            end
+
+            return f
+        end
+
+        --  So it has an environment, time to do the heavy lifting.
+
+        local bytecode = string.dump(f)
+
+        --  TODO: Get function info.
+
+        local new, err = load(bytecode, "temp", "b", env)
+
+        if not new then
+            error("vMake internal error: Failed to copy function " .. "<TODO>" .. " to change its environment: " .. err, 1)
+        end
+
+        local i, nameN, temp = 1
+
+        repeat
+            nameN, temp = debug.getupvalue(new, i)
+
+            if not nameN then
+                break
+            elseif nameN ~= "_ENV" then
+                local j, nameO = 1
+
+                repeat
+                    nameO = debug.getupvalue(f, j)
+
+                    if nameO == nameN then
+                        debug.upvaluejoin(new, i, f, j)
+
+                        break
+                    end
+
+                    j = j + 1
+                until not nameO
+
+                if not nameO then
+                    error("vMake internal error: Failed to restore upvalue \"" .. nameN .. "\" of function " .. "<TODO>", 1)
+                end
+            elseif temp ~= env then
+                --  This can happen if _ENV is not the first upvalue, as `load` sometimes (wrongly) assumes.
+
+                debug.upvaluejoin(new, i, function() return env() end, 1)
+                --  Dummy function will suffice.
+            end
+
+            i = i + 1
+        until not nameN
+
+        if cache[f] then
+            cache[f][env] = new
+        else
+            cache[f] = { [env] = new }
+        end
+
+        cache[new] = { [env] = new }
+        --  Yup, cache this one as well.
+
+        return new
+    end
+end
+
 function assertTypeEx(tname, valType, val, vname, errlvl)
     assert(type(valType) == "string", "vMake internal error: Argument #2 to 'assertType' should be a string.")
 
@@ -879,6 +989,7 @@ end
 function assertType(tname, val, vname, errlvl)
     return assertTypeEx(tname, typeEx(val), val, vname, errlvl and (errlvl + 1) or 1)
 end
+baseEnvironment.assertType = assertType
 
 function checkName(name, obj, errlvl)
     assertType("string", name, obj .. " name", errlvl + 1)
@@ -1574,14 +1685,26 @@ do
             return vmake.Classes.Path(self[_key_path_valu] .. '/' .. othr, otherPathType)
         end,
 
-        __concat = function(self, othr)
-            local othrType = assertType({"string", "number"}, othr, "other piece", 2)
+        __concat = function(left, right)
+            local leftType = assertType({"string", "number", "Path"}, left, "left operand", 2)
 
-            if othrType == "number" then
-                othr = tostring(othr)
+            if leftType == "Path" then
+                local rightType = assertType({"string", "number"}, right, "right operand", 2)
+
+                if rightType == "number" then
+                    right = tostring(right)
+                end
+
+                return vmake.Classes.Path(left[_key_path_valu] .. right, 'U')
+            else
+                --  Right operand has to be the path.
+
+                if leftType == "number" then
+                    left = tostring(left)
+                end
+
+                return left .. right[_key_path_valu]
             end
-
-            return vmake.Classes.Path(self[_key_path_valu] .. othr, 'U')
         end,
 
         Absolute         = { RETRIEVE = _key_path_abso },
@@ -2225,7 +2348,7 @@ do
         __index = function(self, key, errlvl)
             assertType({"string", "number"}, key, "data key", errlvl + 1)
 
-            local res = self:TryGet(key)
+            local res = self:TryGet(key, errlvl + 1)
 
             if res ~= nil then
                 return res
@@ -2234,7 +2357,7 @@ do
             error("vMake error: Missing data item \"" .. tostring(key) .. "\".", errlvl + 1)
         end,
 
-        TryGet = function(self, key)
+        TryGet = function(self, key, errlvl)
             local res = self[_key_data_comp][key]
 
             if res ~= nil then
@@ -2247,15 +2370,17 @@ do
                 local nextData = self[_key_data_next]
 
                 if nextData then
-                    res = nextData:TryGet(key)
+                    res = nextData:TryGet(key, errlvl + 1)
                 end
             elseif type(res) == "function" then
                 --  Functions are executed (once) to obtain the data. They better
                 --  not return nil.
 
+                res = withEnvironment(res, getEnvironment(self))
+
                 local oldCodeLoc = codeLoc; codeLoc = LOC_DATA_EXP
 
-                res = res(getEnvironment(self))
+                res = res()
 
                 codeLoc = oldCodeLoc
             end
@@ -2579,9 +2704,11 @@ do
             local valType = typeEx(val)
 
             if valType == "function" then
+                val = withEnvironment(val, getEnvironment(self))
+
                 local oldCodeLoc = codeLoc; codeLoc = LOC_DATA_EXP
 
-                val = val(getEnvironment(self))
+                val = val()
                 valType = assertType({"string", "List"}, val, "dependencies expansion", errlvl)
 
                 codeLoc = oldCodeLoc
@@ -2672,9 +2799,11 @@ do
             local valType = typeEx(val)
 
             if valType == "function" then
+                val = withEnvironment(val, getEnvironment(self))
+
                 local oldCodeLoc = codeLoc; codeLoc = LOC_DATA_EXP
 
-                val = val(getEnvironment(self))
+                val = val()
                 valType = assertType({"string", "Path", "List"}, val, "output expansion", errlvl)
 
                 codeLoc = oldCodeLoc
@@ -2908,9 +3037,11 @@ do
             local valType = typeEx(val)
 
             if valType == "function" then
+                val = withEnvironment(val, getEnvironment(self))
+
                 local oldCodeLoc = codeLoc; codeLoc = LOC_RULE_FLT
 
-                val = val(getEnvironment(self), dst)
+                val = val(dst)
                 valType = typeEx(val)
 
                 codeLoc = oldCodeLoc
@@ -2928,7 +3059,7 @@ do
                 return val:Contains(dst)
             end
 
-            error("vMake error: Filter of " .. tostring(self) .. " is of unknown type: " .. tostring(valType), 2)
+            error("vMake error: Filter of " .. tostring(self) .. " is of unknown type: " .. valType, 2)
         end,
 
         Source = {
@@ -2965,9 +3096,11 @@ do
             local valType = assertType({"string", "Path", "List", "function"}, val, "source expansion result", 2)
 
             if valType == "function" then
+                val = withEnvironment(val, getEnvironment(self))
+
                 local oldCodeLoc = codeLoc; codeLoc = LOC_RULE_SRC
 
-                val = val(getEnvironment(self), dst)
+                val = val(dst)
 
                 codeLoc = oldCodeLoc
 
@@ -3091,9 +3224,11 @@ do
                 error("vMake error: " .. tostring(self) .. " does not define a handler.", 2)
             end
 
+            han = withEnvironment(han, getEnvironment(self))
+
             local oldCodeLoc = codeLoc; codeLoc = LOC_CMDO_HAN
             
-            local res = han(getEnvironment(self), val)
+            local res = han(val)
 
             codeLoc = oldCodeLoc
         end,
@@ -3254,6 +3389,7 @@ end
 --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
 
 fs = {}
+baseEnvironment.fs = fs
 
 if lfs then
     local modeMap = setmetatable({
@@ -3714,6 +3850,7 @@ function shellmeta.__index(self, key)
 end
 
 sh = setmetatable({ [_key_shll_slnt] = false, [_key_shll_tolr] = false }, shellmeta)
+baseEnvironment.sh = sh
 
 --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
 --  Environments
@@ -3727,14 +3864,7 @@ do
             return envs[obj]
         end
 
-        local envind = {
-            selArch = defaultArch,
-            selConf = defaultConf,
-            selProj = defaultProj,
-            outDir = outDir,
-        }
-
-        local envmtt = {
+        local envind, envmtt = {}, {
             __metatable = "How about no?",
 
             __newindex = function(self, key, val)
@@ -3803,7 +3933,13 @@ do
             local res = envind[key]
 
             if res == nil then
-                res = data:TryGet(key)
+                res = baseEnvironment[key]
+            else
+                return res
+            end
+
+            if res == nil then
+                res = data:TryGet(key, 2)
             end
 
             return res
@@ -3929,8 +4065,8 @@ function vmake.ValidateAndDefault()
 
     if not outDir then
         if #archs > 1 or #configs > 1 then
-            OutputDirectory(function(_)
-                return "./.vmake/" .. (_.selArch.Name .. "." .. _.selConf.Name)
+            OutputDirectory(function()
+                return "./.vmake/" .. (selArch.Name .. "." .. selConf.Name)
             end)
         else
             OutputDirectory "./.vmake"
@@ -4083,6 +4219,9 @@ function vmake.CheckArguments()
     if selProj then defaultProj = selProj end
     if selArch then defaultArch = selArch end
     if selConf then defaultConf = selConf end
+
+    baseEnvironment.selArch, baseEnvironment.selConf, baseEnvironment.selProj = defaultArch, defaultConf, defaultProj
+    --  Done.
 end
 
 function vmake.ExpandProperties()
@@ -4092,12 +4231,16 @@ function vmake.ExpandProperties()
         local fnc = outDir
         outDir = nil
 
+        fnc = withEnvironment(fnc, getEnvironment(vmake.GlobalDataContainer))
+
         local oldCodeLoc = codeLoc; codeLoc = LOC_DATA_EXP
 
-        OutputDirectory(fnc(getEnvironment(vmake.GlobalDataContainer)))
+        OutputDirectory(fnc())
 
         codeLoc = oldCodeLoc
     end
+
+    baseEnvironment.outDir = outDir
 
     --  Step 2, projects.
 
@@ -4553,12 +4696,14 @@ function vmake.DoWork()
             return false
         end
 
+        local act = withEnvironment(item.Rule.Action, getEnvironment(item.Rule))
+
         MSG("Executing ", item)
 
         local oldCodeLoc = codeLoc; codeLoc = LOC_RULE_ACT
         curWorkItem = item
 
-        res = vcall(item.Rule.Action, getEnvironment(item.Rule), item.Path, item.Sources)
+        res = vcall(act, item.Path, item.Sources)
 
         curWorkItem = nil
         codeLoc = oldCodeLoc
@@ -4942,7 +5087,7 @@ end
 CmdOpt "help" "h" {
     Description = "Displays available command-line options.",
 
-    Handler = function(_)
+    Handler = function()
         local parts = {}
 
         local function printHierarchy(val)
@@ -5054,7 +5199,7 @@ CmdOpt "help" "h" {
 CmdOpt "version" "v" {
     Description = "Displays brief information about vMake.",
 
-    Handler = function(_)
+    Handler = function()
         print(vmake.Description)
         vmake.ShouldComputeGraph = false
     end,
@@ -5064,7 +5209,7 @@ CmdOpt "debug" {
     Description = "Enables some debugging features, making the code more strict,"
              .. "\nexposing possibly unwanted behaviour.",
 
-    Handler = function(_)
+    Handler = function()
         vmake.Debug = true
     end,
 }
@@ -5073,7 +5218,7 @@ CmdOpt "print" {
     Description = "Prints all the defined data and the computed work graph"
              .. "\n(a directed dependency graph) which would otherwise be executed.",
 
-    Handler = function(_)
+    Handler = function()
         vmake.ShouldPrintGraph = true
         vmake.ShouldDoWork = false
     end,
@@ -5083,7 +5228,7 @@ CmdOpt "clean" "c" {
     Description = "Cleans the output directory."
              .. "\nWill not perform a build unless `--full` is also specified.",
 
-    Handler = function(_)
+    Handler = function()
         vmake.ShouldClean = true
 
         if not vmake.FullBuild then
@@ -5096,7 +5241,7 @@ CmdOpt "full" "f" {
     Description = "Indicates that work items should be executed even if they"
              .. "\nare considered up-to-date.",
 
-    Handler = function(_)
+    Handler = function()
         vmake.FullBuild = true
 
         if vmake.ShouldClean then
@@ -5111,7 +5256,7 @@ CmdOpt "jobs" "j" {
 
     Type = "integer",
 
-    Handler = function(_, val)
+    Handler = function(val)
         if val < 0 then
             error("vMake error: Number of jobs must be 0 for unlimited or a positive integer.")
         end
@@ -5127,7 +5272,7 @@ CmdOpt "jobs" "j" {
 CmdOpt "parallel-bar" {
     Description = "Enables the display of a progress bar when using GNU Parallel.",
 
-    Handler = function(_)
+    Handler = function()
         vmake.CheckGnuParallel()
 
         vmake.ParallelOpts:Append("--bar")
@@ -5137,7 +5282,7 @@ CmdOpt "parallel-bar" {
 CmdOpt "silent" {
     Description = "Omits unsilenced shell commands from standard output.",
 
-    Handler = function(_)
+    Handler = function()
         if vmake.Verbose then
             error("vMake error: Cannot be silent and verbose at the same time.")
         end
@@ -5150,7 +5295,7 @@ CmdOpt "verbose" {
     Description = "Outputs more detailed information to standard output,"
              .. "\nsuch as the steps taken by vMake and all shell commands executed.",
 
-    Handler = function(_)
+    Handler = function()
         if vmake.Silent then
             error("vMake error: Cannot be silent and verbose at the same time.")
         end
@@ -5206,7 +5351,8 @@ local function parseListElement(line, linelen, i)
     local parenStack, quoteStart = {}
 
     local firstChar = line:sub(i, i)
-    local firstCharSpecial = string.find("!@$", firstChar, 1, true)
+    local firstCharSpecial = string.find("!$", firstChar, 1, true)
+    -- local firstCharSpecial = string.find("!@$", firstChar, 1, true)
 
     if not firstCharSpecial then
         firstChar = false
@@ -5307,9 +5453,9 @@ local function parseListElement(line, linelen, i)
 
                         return table.concat(res), i, firstChar, string.format("Unexpected closing bracket '%s' at character #%d; expected '%s'", c, i, parenStack[#parenStack])
                     end
-                elseif c == "@" then
-                    res[#res + 1] = " _"
-                    afterSpecial = c
+                -- elseif c == "@" then
+                --     res[#res + 1] = " _"
+                --     afterSpecial = c
                 elseif c == "$" then
                     res[#res + 1] = " env"
                     afterSpecial = c
@@ -5413,9 +5559,9 @@ do
                 values[i] = lst[i].Text
 
                 if lst[i].Special then
-                    if lst[i].Special == "@" then
-                        error("vMake error: List semantics error: Cannot use special character '@' in this context.", 2)
-                    end
+                    -- if lst[i].Special == "@" then
+                    --     error("vMake error: List semantics error: Cannot use special character '@' in this context.", 2)
+                    -- end
 
                     if i == 1 then
                         template[2] = "%s\n"
@@ -5454,6 +5600,7 @@ do
             os.exit(4)
         end
     end
+    baseEnvironment.List = List
 end
 
 --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
@@ -5475,6 +5622,7 @@ function L(code)
 end]]):format(params, expression)
         , "lambda")()
 end
+baseEnvironment.L = L
 
 local function lambdaShortcut(name, params, filter)
     assertType("string", name, "lambda shortcut name", 2)
@@ -5567,7 +5715,7 @@ DAT = lambdaShortcut("data", "_", function(exp)
 
     local res, lastSep, lastWasEmpty = {}, nil, false
 
-    for chunk, sep in string.iteratesplit(exp, '[@$]') do
+    for chunk, sep in string.iteratesplit(exp, '[%$]') do
         if lastSep then
             if lastWasEmpty then
                 res[#res + 1] = lastSep
@@ -5579,17 +5727,9 @@ DAT = lambdaShortcut("data", "_", function(exp)
                     lastWasEmpty = true
                 else
                     if chunk:sub(1, 1) == '[' then
-                        if lastSep == '@' then
-                            res[#res + 1] = " _"
-                        else
-                            res[#res + 1] = " env"
-                        end
+                        res[#res + 1] = " env"
                     elseif chunk:match("^([_a-zA-Z])") then
-                        if lastSep == '@' then
-                            res[#res + 1] = " _."
-                        else
-                            res[#res + 1] = " env."
-                        end
+                        res[#res + 1] = " env."
                     else
                         error("Data lambda syntax error: '" .. lastSep .. "' should directly preceed an identifier or an array index (in square brackets).")
                     end
@@ -5611,12 +5751,12 @@ DAT = lambdaShortcut("data", "_", function(exp)
     return table.concat(res)
 end)
 
-FLT = lambdaShortcut("rule filter", "_, dst", function(exp)
+FLT = lambdaShortcut("rule filter", "dst", function(exp)
     assertType("string", exp, "rule filter lambda expression", 3)
 
     local res, lastSep, lastWasEmpty = {}, nil, false
 
-    for chunk, sep in string.iteratesplit(exp, '[@$]') do
+    for chunk, sep in string.iteratesplit(exp, '[%$]') do
         if lastSep then
             if lastWasEmpty then
                 res[#res + 1] = lastSep
@@ -5628,17 +5768,9 @@ FLT = lambdaShortcut("rule filter", "_, dst", function(exp)
                     lastWasEmpty = true
                 else
                     if chunk:sub(1, 1) == '[' then
-                        if lastSep == '@' then
-                            res[#res + 1] = " _"
-                        else
-                            res[#res + 1] = " env"
-                        end
+                        res[#res + 1] = " env"
                     elseif chunk:match("^([_a-zA-Z])") then
-                        if lastSep == '@' then
-                            res[#res + 1] = " _."
-                        else
-                            res[#res + 1] = " env."
-                        end
+                        res[#res + 1] = " env."
                     else
                         error("Rule filter lambda syntax error: '" .. lastSep .. "' should directly preceed an identifier or an array index (in square brackets).")
                     end
@@ -5660,7 +5792,7 @@ FLT = lambdaShortcut("rule filter", "_, dst", function(exp)
     return table.concat(res)
 end)
 
-LST = lambdaShortcut("data list", "_", function(exp)
+LST = lambdaShortcut("data list", "", function(exp)
     assertType("string", exp, "data list lambda expression", 3)
 
     local lst, err = parseList(exp)
@@ -5694,7 +5826,7 @@ LST = lambdaShortcut("data list", "_", function(exp)
     return table.concat(template):format(unpack(values))
 end)
 
-ACT = lambdaShortcut("rule action", "_, dst, src", function(exp)
+ACT = lambdaShortcut("rule action", "dst, src", function(exp)
     assertType("string", exp, "rule action lambda expression", 3)
 
     local lst, err = parseList(exp)
@@ -5738,38 +5870,36 @@ end)
 
 --  Does what it says on the tin. It's a blank tin.
 function DoNothing() end
+baseEnvironment.DoNothing = DoNothing
 
 --  Ditto.
 function NewList() return List { } end
+baseEnvironment.NewList = NewList
 
 --  An action which copies a single source file to the destination.
-function CopySingleFileAction(_, dst, src)
+function CopySingleFileAction(dst, src)
     fs.Copy(dst, src[1])
 end
 
 --  Creates a rule which pretends to provide missing files matching the given
 --  set of extensions.
 function ExcuseMissingFilesRule(ext)
-    local extType = assertType({"string", "List", "table", "function"}, ext, "extension", 2)
+    assertType({"string", "List", "table", "function"}, ext, "extension(s)", 2)
 
     return Rule "Excuse Missing Headers" {
         Data = {
-            ExcusedExtensions = function(_)
-                if extType == "function" then
-                    local oldCodeLoc = codeLoc; codeLoc = LOC_DATA_EXP
+            ExcusedExtensionsSource = ext,
 
-                    ext = ext(_)
+            ExcusedExtensions = function()
+                local ext = ExcusedExtensionsSource
 
-                    codeLoc = oldCodeLoc
-
-                    extType = assertType({"string", "List", "table"}, ext, "extension expansion", 2)
-                end
+                local extType = assertType({"string", "List", "table"}, ext, "extension expansion", 1)
 
                 if extType == "string" then
                     ext = vmake.Classes.List(true, { ext })
                 else
                     for i = 1, #ext do
-                        assertType("string", ext[i], "extension #" .. i, 2)
+                        assertType("string", ext[i], "extension #" .. i, 1)
                     end
 
                     if extType == "table" then
@@ -5783,8 +5913,8 @@ function ExcuseMissingFilesRule(ext)
             end,
         },
 
-        Filter = function(_, dst)
-            return dst:CheckExtension(_.ExcusedExtensions) and not fs.GetInfo(dst)
+        Filter = function(dst)
+            return dst:CheckExtension(ExcusedExtensions) and not fs.GetInfo(dst)
         end,
 
         Source = NewList,
@@ -5798,9 +5928,9 @@ function CreateMissingDirectoriesRule(shared)
     return Rule "Create Missing Directories" {
         Shared = shared or false,
 
-        Filter = function(_, dst) return dst.IsDirectory end,
+        Filter = function(dst) return dst.IsDirectory end,
 
-        Action = function(_, dst, src)
+        Action = function(dst, src)
             fs.MkDir(dst)
         end,
     }
@@ -5917,6 +6047,7 @@ function ParseGccDependencies(dst, src, keepSrc)
 
     return deps
 end
+baseEnvironment.ParseGccDependencies = ParseGccDependencies
 
 local function parseObjectExtension(path, header)
     if header then
@@ -5953,43 +6084,43 @@ local function checkObjectExtension(path, ext, header)
     end
 end
 
-local function sourceArchitecturalCode(_, dst)
+local function sourceArchitecturalCode(dst)
     local file, arch, src, res = parseObjectExtension(dst, false)
 
     if arch then
-        if _.SourcesSubdirectory then
-            src = _.ArchitecturesDirectory + arch.Name + _.SourcesSubdirectory + Path(file):Skip(_.ObjectsDirectory)
+        if SourcesSubdirectory then
+            src = ArchitecturesDirectory + arch.Name + SourcesSubdirectory + Path(file):Skip(ObjectsDirectory)
         else
-            src = _.ArchitecturesDirectory + arch.Name + Path(file):Skip(_.ObjectsDirectory)
+            src = ArchitecturesDirectory + arch.Name + Path(file):Skip(ObjectsDirectory)
         end
     else
-        if _.SourcesSubdirectory then
-            src = _.CommonDirectory + _.SourcesSubdirectory + Path(file):Skip(_.ObjectsDirectory)
+        if SourcesSubdirectory then
+            src = CommonDirectory + SourcesSubdirectory + Path(file):Skip(ObjectsDirectory)
         else
-            src = _.CommonDirectory + Path(file):Skip(_.ObjectsDirectory)
+            src = CommonDirectory + Path(file):Skip(ObjectsDirectory)
         end
     end
 
-    if settMakeDeps then
+    if UseMakeDependencies then
         res = ParseGccDependencies(dst, src, true) + List { dst:GetParent() }
     else
         res = List { src, dst:GetParent() }
     end
 
-    if _.PrecompiledCppHeader then
-        res:Append(_.PrecompiledCppHeaderPath .. ".gch")
+    if PrecompiledCppHeader then
+        res:Append(PrecompiledCppHeaderPath .. ".gch")
     end
 
     return res
 end
 
-local function sourceArchitecturalHeader(_, dst)
+local function sourceArchitecturalHeader(dst)
     local file, src, res = parseObjectExtension(dst, true), nil
-    file = Path(file):Skip(_.PchDirectory)
+    file = Path(file):Skip(PchDirectory)
 
-    if _.HeadersSubdirectory then
-        for arch in _.selArch:Hierarchy() do
-            local pth = _.ArchitecturesDirectory + arch.Name + _.HeadersSubdirectory + file
+    if HeadersSubdirectory then
+        for arch in selArch:Hierarchy() do
+            local pth = ArchitecturesDirectory + arch.Name + HeadersSubdirectory + file
 
             if fs.GetInfo(pth) then
                 src = pth
@@ -5999,11 +6130,11 @@ local function sourceArchitecturalHeader(_, dst)
         end
 
         if not src then
-            src = _.comp.Directory + _.HeadersSubdirectory + file
+            src = comp.Directory + HeadersSubdirectory + file
         end
     else
-        for arch in _.selArch:Hierarchy() do
-            local pth = _.ArchitecturesDirectory + arch.Name + file
+        for arch in selArch:Hierarchy() do
+            local pth = ArchitecturesDirectory + arch.Name + file
 
             if fs.GetInfo(pth) then
                 src = pth
@@ -6013,11 +6144,11 @@ local function sourceArchitecturalHeader(_, dst)
         end
 
         if not src then
-            src = _.comp.Directory + file
+            src = comp.Directory + file
         end
     end
 
-    if settMakeDeps then
+    if UseMakeDependencies then
         res = ParseGccDependencies(dst, src, true) + List { dst:GetParent() }
     else
         res = List { src, dst:GetParent() }
@@ -6031,83 +6162,83 @@ local function generateManagedComponent(compType)
         local comp = compType(name)({ })
 
         local data = {
-            CommonDirectory = DAT "@comp.Directory",
-            ArchitecturesDirectory = DAT "@comp.Directory",
+            CommonDirectory = DAT "comp.Directory",
+            ArchitecturesDirectory = DAT "comp.Directory",
 
             SourcesSubdirectory = false,
             HeadersSubdirectory = false,
 
-            IncludeDirectories = function(_)
+            IncludeDirectories = function()
                 local res = List { }
 
-                if _.PrecompiledCHeader or _.PrecompiledCppHeader then
-                    res:Append(_.PchDirectory)
+                if PrecompiledCHeader or PrecompiledCppHeader then
+                    res:Append(PchDirectory)
                 end
 
-                if _.HeadersSubdirectory then
-                    res:Append(_.comp.Directory + _.HeadersSubdirectory)
+                if HeadersSubdirectory then
+                    res:Append(comp.Directory + HeadersSubdirectory)
 
-                    for arch in _.selArch:Hierarchy() do
-                        res:Append(_.ArchitecturesDirectory + arch.Name + _.HeadersSubdirectory)
+                    for arch in selArch:Hierarchy() do
+                        res:Append(ArchitecturesDirectory + arch.Name + HeadersSubdirectory)
                     end
                 else
-                    res:Append(_.comp.Directory)
+                    res:Append(comp.Directory)
 
-                    for arch in _.selArch:Hierarchy() do
-                        res:Append(_.ArchitecturesDirectory + arch.Name)
+                    for arch in selArch:Hierarchy() do
+                        res:Append(ArchitecturesDirectory + arch.Name)
                     end
                 end
 
                 return res
             end,
 
-            Opts_Includes_Base = function(_)
-                return _.IncludeDirectories:Select(function(val) return "-I" .. tostring(val) end)
+            Opts_Includes_Base = function()
+                return IncludeDirectories:Select(function(val) return "-I" .. val end)
             end,
 
-            Opts_Includes_Nasm_Base = function(_)
-                return _.Opts_Includes_Base:Select(function(dir) return dir .. "/" end)
+            Opts_Includes_Nasm_Base = function()
+                return Opts_Includes_Base:Select(function(dir) return dir .. "/" end)
             end,
 
-            Opts_Includes      = DAT "@Opts_Includes_Base",
-            Opts_Includes_Nasm = DAT "@Opts_Includes_Nasm_Base",
+            Opts_Includes      = DAT "Opts_Includes_Base",
+            Opts_Includes_Nasm = DAT "Opts_Includes_Nasm_Base",
 
-            Opts_Libraries = function(_)
-                return _.Libraries:Select(function(val)
+            Opts_Libraries = function()
+                return Libraries:Select(function(val)
                     return "-l" .. val
                 end)
             end,
 
             Libraries = List { },   --  Default to none.
 
-            ObjectsDirectory = DAT "@outDir + @comp.Directory",
+            ObjectsDirectory = DAT "outDir + comp.Directory",
 
-            Objects = function(_)
-                local comSrcDir = _.CommonDirectory
+            Objects = function()
+                local comSrcDir = CommonDirectory
 
-                if _.SourcesSubdirectory then
-                    comSrcDir = comSrcDir + _.SourcesSubdirectory
+                if SourcesSubdirectory then
+                    comSrcDir = comSrcDir + SourcesSubdirectory
                 end
 
                 local objects = fs.ListDir(comSrcDir)
-                    :Where(function(val) return val:EndsWith(_.SourceExtensions:Unpack()) end)
+                    :Where(function(val) return val:EndsWith(SourceExtensions:Unpack()) end)
                     :Select(function(val)
-                        return _.ObjectsDirectory + val:Skip(comSrcDir) .. ".o"
+                        return ObjectsDirectory + val:Skip(comSrcDir) .. ".o"
                     end)
 
-                for arch in _.selArch:Hierarchy() do
-                    local arcSrcDir = _.ArchitecturesDirectory + arch.Name
+                for arch in selArch:Hierarchy() do
+                    local arcSrcDir = ArchitecturesDirectory + arch.Name
                     local suffix = "." .. arch.Name .. ".o"
 
-                    if _.SourcesSubdirectory then
-                        arcSrcDir = arcSrcDir + _.SourcesSubdirectory
+                    if SourcesSubdirectory then
+                        arcSrcDir = arcSrcDir + SourcesSubdirectory
                     end
 
                     if fs.GetInfo(arcSrcDir) then
                         objects:AppendMany(fs.ListDir(arcSrcDir)
-                            :Where(function(val) return val:EndsWith(_.SourceExtensions:Unpack()) end)
+                            :Where(function(val) return val:EndsWith(SourceExtensions:Unpack()) end)
                             :Select(function(val)
-                                return _.ObjectsDirectory + val:Skip(arcSrcDir) .. suffix
+                                return ObjectsDirectory + val:Skip(arcSrcDir) .. suffix
                             end))
                     end
                 end
@@ -6115,13 +6246,13 @@ local function generateManagedComponent(compType)
                 return objects
             end,
 
-            PchDirectory = DAT "@outDir + @comp.Directory + '.pch'",
+            PchDirectory = DAT "outDir + comp.Directory + '.pch'",
 
-            PrecompiledCHeaderPath   = DAT "@PchDirectory + @PrecompiledCHeader",
-            PrecompiledCppHeaderPath = DAT "@PchDirectory + @PrecompiledCppHeader",
+            PrecompiledCHeaderPath   = DAT "PchDirectory + PrecompiledCHeader",
+            PrecompiledCppHeaderPath = DAT "PchDirectory + PrecompiledCppHeader",
 
-            SourceExtensions = function(_)
-                return _.Languages:Select(function(lang)
+            SourceExtensions = function()
+                return Languages:Select(function(lang)
                     if lang == "C++" then
                         return ".cpp"
                     elseif lang == "C" then
@@ -6136,8 +6267,8 @@ local function generateManagedComponent(compType)
                 end)
             end,
 
-            HeaderExtensions = function(_)
-                local res = _.Languages:Select(function(lang)
+            HeaderExtensions = function()
+                local res = Languages:SelectUnique(function(lang)
                     if lang == "C++" then
                         return ".hpp"
                     elseif lang == "C" then
@@ -6157,7 +6288,7 @@ local function generateManagedComponent(compType)
                 return res
             end,
 
-            BinaryPath = DAT "@comp.Output:First()",
+            BinaryPath = DAT "comp.Output:First()",
 
             BinaryDependencies = List { },
 
@@ -6203,57 +6334,57 @@ local function generateManagedComponent(compType)
 
             if langsProvided:Contains("C") then
                 comp:AddMember(Rule "Compile C" {
-                    Filter = function(_, dst) return checkObjectExtension(dst, "c", false) end,
+                    Filter = function(dst) return checkObjectExtension(dst, "c", false) end,
 
                     Source = sourceArchitecturalCode,
 
-                    Action = ACT "@CC @Opts_C -x c -c !src[1] -o !dst",
+                    Action = ACT "!CC !Opts_C -x c -c !src[1] -o !dst",
                 })
 
                 comp:AddMember(Rule "Precompile C Header" {
-                    Filter = function(_, dst) return checkObjectExtension(dst, "h", true) end,
+                    Filter = function(dst) return checkObjectExtension(dst, "h", true) end,
 
                     Source = sourceArchitecturalHeader,
 
-                    Action = ACT "@CC @Opts_C -x c-header -c !src[1] -o !dst",
+                    Action = ACT "!CC !Opts_C -x c-header -c !src[1] -o !dst",
                 })
             end
 
             if langsProvided:Contains("C++") then
                 comp:AddMember(Rule "Compile C++" {
-                    Filter = function(_, dst) return checkObjectExtension(dst, "cpp", false) end,
+                    Filter = function(dst) return checkObjectExtension(dst, "cpp", false) end,
 
                     Source = sourceArchitecturalCode,
 
-                    Action = ACT "@CXX @Opts_CXX -x c++ -c !src[1] -o !dst",
+                    Action = ACT "!CXX !Opts_CXX -x c++ -c !src[1] -o !dst",
                 })
 
                 comp:AddMember(Rule "Precompile C++ Header" {
-                    Filter = function(_, dst) return checkObjectExtension(dst, "hpp", true) end,
+                    Filter = function(dst) return checkObjectExtension(dst, "hpp", true) end,
 
                     Source = sourceArchitecturalHeader,
 
-                    Action = ACT "@CXX @Opts_CXX -x c++-header -c !src[1] -o !dst",
+                    Action = ACT "!CXX !Opts_CXX -x c++-header -c !src[1] -o !dst",
                 })
             end
 
             if langsProvided:Contains("GAS") then
                 comp:AddMember(Rule "Assemble w/ GAS" {
-                    Filter = function(_, dst) return checkObjectExtension(dst, "S", false) end,
+                    Filter = function(dst) return checkObjectExtension(dst, "S", false) end,
 
                     Source = sourceArchitecturalCode,
 
-                    Action = ACT "@GAS @Opts_GAS -x assembler-with-cpp -c !src[1] -o !dst",
+                    Action = ACT "!GAS !Opts_GAS -x assembler-with-cpp -c !src[1] -o !dst",
                 })
             end
 
             if langsProvided:Contains("NASM") then
                 comp:AddMember(Rule "Assemble w/ NASM" {
-                    Filter = function(_, dst) return checkObjectExtension(dst, "asm", false) end,
+                    Filter = function(dst) return checkObjectExtension(dst, "asm", false) end,
 
                     Source = sourceArchitecturalCode,
 
-                    Action = ACT "@AS @Opts_NASM !src[1] -o !dst",
+                    Action = ACT "!AS !Opts_NASM !src[1] -o !dst",
                 })
             end
 
@@ -6265,53 +6396,53 @@ local function generateManagedComponent(compType)
 
             if targetProvided == "Executable" then
                 comp:AddMember(Rule "Link Executable" {
-                    Filter = function(_, dst) return _.BinaryPath end,
+                    Filter = function(dst) return BinaryPath end,
 
-                    Source = function(_, dst)
-                        if _.LinkerScript then
-                            return _.Objects + List { dst:GetParent(), _.LinkerScript } + _.BinaryDependencies
+                    Source = function(dst)
+                        if LinkerScript then
+                            return Objects + List { dst:GetParent(), LinkerScript } + BinaryDependencies
                         else
-                            return _.Objects + List { dst:GetParent() } + _.BinaryDependencies
+                            return Objects + List { dst:GetParent() } + BinaryDependencies
                         end
                     end,
 
-                    Action = function(_, dst, src)
-                        if _.LinkerScript then
-                            sh.silent(_.LD, _.Opts_LD, "-T", _.LinkerScript, "-o", dst, _.Objects, _.Opts_Libraries)
+                    Action = function(dst, src)
+                        if LinkerScript then
+                            sh.silent(LD, Opts_LD, "-T", LinkerScript, "-o", dst, Objects, Opts_Libraries)
                         else
-                            sh.silent(_.LD, _.Opts_LD, "-o", dst, _.Objects, _.Opts_Libraries)
+                            sh.silent(LD, Opts_LD, "-o", dst, Objects, Opts_Libraries)
                         end
                     end,
                 })
             elseif targetProvided == "Dynamic Library" then
                 comp:AddMember(Rule "Link Dynamic Library" {
-                    Filter = function(_, dst) return _.BinaryPath end,
+                    Filter = function(dst) return BinaryPath end,
 
-                    Source = function(_, dst)
-                        if _.LinkerScript then
-                            return _.Objects + List { dst:GetParent(), _.LinkerScript } + _.BinaryDependencies
+                    Source = function(dst)
+                        if LinkerScript then
+                            return Objects + List { dst:GetParent(), LinkerScript } + BinaryDependencies
                         else
-                            return _.Objects + List { dst:GetParent() } + _.BinaryDependencies
+                            return Objects + List { dst:GetParent() } + BinaryDependencies
                         end
                     end,
 
-                    Action = function(_, dst, src)
-                        if _.LinkerScript then
-                            sh.silent(_.LD, "-shared", _.Opts_LD, "-T", _.LinkerScript, "-o", dst, _.Objects, _.Opts_Libraries)
+                    Action = function(dst, src)
+                        if LinkerScript then
+                            sh.silent(LD, "-shared", Opts_LD, "-T", LinkerScript, "-o", dst, Objects, Opts_Libraries)
                         else
-                            sh.silent(_.LD, "-shared", _.Opts_LD, "-o", dst, _.Objects, _.Opts_Libraries)
+                            sh.silent(LD, "-shared", Opts_LD, "-o", dst, Objects, Opts_Libraries)
                         end
                     end,
                 })
             elseif targetProvided == "Static Library" then
                 comp:AddMember(Rule "Archive Objects" {
-                    Filter = function(_, dst) return _.BinaryPath end,
+                    Filter = function(dst) return BinaryPath end,
 
-                    Source = function(_, dst)
-                        return _.Objects + List { dst:GetParent() } + _.BinaryDependencies 
+                    Source = function(dst)
+                        return Objects + List { dst:GetParent() } + BinaryDependencies 
                     end,
 
-                    Action = ACT "@AR @Opts_AR !dst @Objects",
+                    Action = ACT "!AR !Opts_AR !dst !Objects",
                 })
             elseif targetProvided ~= "Custom" then
                 error("vMake error: Unknown complex project/component target: " .. tostring(targetProvided)
@@ -6319,8 +6450,8 @@ local function generateManagedComponent(compType)
             end
 
             if excusesHeaders then
-                comp:AddMember(ExcuseMissingFilesRule(function(_)
-                    return _.HeaderExtensions:Select(function(ext)
+                comp:AddMember(ExcuseMissingFilesRule(function()
+                    return HeaderExtensions:Select(function(ext)
                         return ext:sub(1)
                         --  Skips the dot.
                     end)
