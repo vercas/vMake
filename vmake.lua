@@ -847,7 +847,66 @@ do
 end
 
 if setfenv then
-    error("TODO")
+    local cache = {}
+
+    function withEnvironment(f, env)
+        if cache[f] and cache[f][env] then
+            return cache[f][env]
+        end
+
+        local bytecode = string.dump(f)
+
+        --  TODO: Get function info.
+
+        local new, err = loadstring(bytecode)
+
+        if not new then
+            error("vMake internal error: Failed to copy function " .. "<TODO>" .. " to change its environment: " .. err, 1)
+        end
+
+        setfenv(new, env)
+
+        local i, nameN = 1
+
+        repeat
+            nameN = debug.getupvalue(new, i)
+
+            if not nameN then
+                break
+            end
+
+            local j, nameO, temp = 1
+
+            repeat
+                nameO, temp = debug.getupvalue(f, j)
+
+                if nameO == nameN then
+                    debug.setupvalue(new, i, temp)
+
+                    break
+                end
+
+                j = j + 1
+            until not nameO
+
+            if not nameO then
+                error("vMake internal error: Failed to set upvalue \"" .. nameN .. "\" of function " .. "<TODO>", 1)
+            end
+
+            i = i + 1
+        until not nameN
+
+        if cache[f] then
+            cache[f][env] = new
+        else
+            cache[f] = { [env] = new }
+        end
+
+        cache[new] = { [env] = new }
+        --  Yup, cache this one as well.
+
+        return new
+    end
 else
     local cache = {}
 
