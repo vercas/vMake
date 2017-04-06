@@ -60,8 +60,8 @@ local luaVersion = _____________t[1] or _____________t[1/0] or _____________t[__
 --  Taken from http://lua-users.org/lists/lua-l/2016-05/msg00297.html
 
 local vmake, vmake__call, getEnvironment, withEnvironment = {
-    Version = "1.7.0",
-    VersionNumber = 1007000,
+    Version = "2.1.0",
+    VersionNumber = 2001000,
 
     Debug = false,
     Silent = false,
@@ -6263,9 +6263,7 @@ local function generateManagedComponent(compType)
             Opts_Includes_Nasm = DAT "Opts_Includes_Nasm_Base",
 
             Opts_Libraries = function()
-                return Libraries:Select(function(val)
-                    return "-l" .. val
-                end)
+                return Libraries:Select(L "|val| '-l' .. val")
             end,
 
             Libraries = List { },   --  Default to none.
@@ -6534,3 +6532,24 @@ end
 
 ManagedProject = generateManagedComponent(Project)
 ManagedComponent = generateManagedComponent(Component)
+
+function DataFromCommand(cmd, fnc)
+    assertType("string", cmd, "cmd", 2)
+
+    fnc = fnc or List
+
+    return function()
+        local fp = _G.io.popen(cmd)
+        local output, a, b, c = fp:read("*a")
+
+        if output then
+            a, b, c = fp:close()
+        end
+
+        if not output or c == 1 then
+            _G.error("Could not get data from command `" .. cmd .. "`: " .. a .. "; " .. b .. "; " .. c)
+        end
+
+        return fnc(output)
+    end
+end
