@@ -60,8 +60,8 @@ local luaVersion = _____________t[1] or _____________t[1/0] or _____________t[__
 --  Taken from http://lua-users.org/lists/lua-l/2016-05/msg00297.html
 
 local vmake, vmake__call, getEnvironment, withEnvironment = {
-    Version = "2.1.0",
-    VersionNumber = 2001000,
+    Version = "3.0.0",
+    VersionNumber = 3000000,
 
     Debug = false,
     Silent = false,
@@ -74,6 +74,7 @@ local vmake, vmake__call, getEnvironment, withEnvironment = {
     ShouldDoWork = true,
     ShouldPrintGraph = false,
     ShouldClean = false,
+    ShouldGenerateMakefile = false,
 
     FullBuild = false,
     WorkGraph = false,
@@ -85,6 +86,15 @@ local vmake, vmake__call, getEnvironment, withEnvironment = {
     JobsDir = false,
     ParallelOpts = false,
     HasGnuParallel = false,
+    HasMake = false,
+
+    Target = false,
+    TargetPath = false,
+
+    Combinations = false,
+    TransferredArguments = false,
+
+    ItemFilter = false,
 }
 
 local baseEnvironment = {
@@ -97,7 +107,7 @@ local LOC_CMDO_HAN = 5
 
 local curWorkItem = nil
 
-vmake.Description = "vMake v" .. vmake.Version .. " [" .. vmake.VersionNumber
+vmake.Description = "vMake " .. vmake.Version .. " [" .. vmake.VersionNumber
 .. "] (c) 2016 Alexandru-Mihai Maftei, running under " .. luaVersion
 
 pcall(require, "lfs")
@@ -105,6 +115,18 @@ pcall(require, "lfs")
 SH_AND, SH_SEP, SH_RAW = {}, {}, {}
 
 baseEnvironment.SH_AND, baseEnvironment.SH_SEP, baseEnvironment.SH_RAW = SH_AND, SH_SEP, SH_RAW
+
+local targetData = {
+    [false] = { },
+    ["full"] = { Full = true },
+
+    ["generate-makefile"]     = { Full = true },
+    ["generate-shell-script"] = { Full = true, Capturing = true },
+    ["extract-commands"]      = { Full = true, Capturing = true },
+
+    ["single-item"] = { },
+    ["lint"] = { Full = true },
+}
 
 --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
 --  Top-level Declarations
@@ -114,11 +136,23 @@ baseEnvironment.SH_AND, baseEnvironment.SH_SEP, baseEnvironment.SH_RAW = SH_AND,
 local configs, archs, projects, comps, rules, cmdlopts = {}, {}, {}, {}, {}, {}
 local defaultProj, defaultArch, defaultConf, outDir = false, false, false, false
 
+local checkName, normalizeName
+
 function Default(name, tolerant)
     assertType("string", name, "named default", 2)
     assertType({"nil", "boolean"}, tolerant, "tolerant", 2)
 
-    local proj, arch, conf = projects[name], archs[name], configs[name]
+    if #name < 1 then
+        error("vMake error: Name must be non-empty.", 2)
+    end
+
+    local nname = normalizeName(name)
+
+    if nname[1] == "-" or nname[#nname] == "-" then
+        error("vMake error: Name (\"" .. name .. "\") needs to begin and end with alphanumeric characters.", 2)
+    end
+
+    local proj, arch, conf = projects[nname], archs[nname], configs[nname]
 
     if proj then
         if defaultProj then
@@ -205,11 +239,11 @@ end
 baseEnvironment.DirPath = DirPath
 
 function Configuration(name)
-    checkName(name, "configuration", 2)
+    local nname = checkName(name, "configuration", 2)
 
-    local res = vmake.Classes.Configuration(name)
+    local res = vmake.Classes.Configuration(name, nname)
 
-    configs[name] = res
+    configs[nname] = res
     configs[#configs + 1] = res
 
     return function(tab)
@@ -226,22 +260,16 @@ function Configuration(name)
 end
 
 function GetConfiguration(name)
-    assertType("string", name, "configuration name", 2)
-
-    if #name < 1 then
-        error("vMake error: Name of configuration must be non-empty.", 2)
-    end
-
-    return configs[name]
+    return configs[checkName(name, "configuration", 2, true)]
 end
 baseEnvironment.GetConfiguration = baseEnvironment.GetConfiguration
 
 function Architecture(name)
-    checkName(name, "architecture", 2)
+    local nname = checkName(name, "architecture", 2)
 
-    local res = vmake.Classes.Architecture(name)
+    local res = vmake.Classes.Architecture(name, nname)
 
-    archs[name] = res
+    archs[nname] = res
     archs[#archs + 1] = res
 
     return function(tab)
@@ -249,7 +277,7 @@ function Architecture(name)
 
         for k, v in pairs(tab) do
             assertType("string", k, "table key", 2)
-            
+
             res[k] = v
         end
 
@@ -258,24 +286,18 @@ function Architecture(name)
 end
 
 function GetArchitecture(name)
-    assertType("string", name, "architecture name", 2)
-
-    if #name < 1 then
-        error("vMake error: Name of architecture must be non-empty.", 2)
-    end
-
-    return archs[name]
+    return archs[checkName(name, "architecture", 2, true)]
 end
 baseEnvironment.GetArchitecture = baseEnvironment.GetArchitecture
 
 local function spawnProjectFunction(pType, tName, topLevel)
     return function(name)
-        checkName(name, tName, 2)
+        local nname = checkName(name, tName, 2)
 
-        local res = vmake.Classes.Project(name, pType)
+        local res = vmake.Classes.Project(name, nname, pType)
 
         if topLevel then
-            projects[name] = res
+            projects[nname] = res
             projects[#projects + 1] = res
         else
             comps[#comps + 1] = res
@@ -286,7 +308,7 @@ local function spawnProjectFunction(pType, tName, topLevel)
 
             for k, v in pairs(tab) do
                 assertType({"string", "integer"}, k, tName .. " table key", 2)
-                
+
                 if type(k) == "string" then
                     res[k] = v
                 end
@@ -316,7 +338,7 @@ function Rule(name)
 
         for k, v in pairs(tab) do
             assertType("string", k, "table key", 2)
-            
+
             res[k] = v
         end
 
@@ -348,7 +370,7 @@ function CmdOpt(name)
         if valType == "table" then
             for k, v in pairs(val) do
                 assertType("string", k, "table key", 2)
-                
+
                 res[k] = v
             end
 
@@ -484,7 +506,7 @@ local function printEndData(self, indent, out)
 
     for i = 1, #self.Stack do
         local info, appendSource = self.Stack[i]
-        
+
         append(myIndent)
         append(tostring(i))
         append "\t"
@@ -502,7 +524,7 @@ local function printEndData(self, indent, out)
                         append ":"
                         append(tostring(info.currentline))
                     end
-                    
+
                     append "\n"
 
                     if info.what == "Lua" and info.linedefined and (info.linedefined ~= info.currentline or info.lastlinedefined ~= info.currentline) then
@@ -518,7 +540,7 @@ local function printEndData(self, indent, out)
                             append "-"
                             append(tostring(info.lastlinedefined))
                         end
-                
+
                         append "\n"
                     end
                 else
@@ -551,7 +573,7 @@ local function printEndData(self, indent, out)
                             append(tostring(info.lastlinedefined))
                         end
                     end
-                
+
                     append "\n"
                 else
                     append "  [C]\n"
@@ -620,7 +642,7 @@ local function printEndData(self, indent, out)
             end
 
             local extraIndent = myIndent .. "\t\t"
-            local done = { [_G] = true, [vmake] = true, }
+            local done = { [_G] = true, [vmake] = true, [self] = true }
 
             for j = 1, #info._locals do
                 local key, value = info._locals[j].name, info._locals[j].value
@@ -1050,20 +1072,34 @@ function assertType(tname, val, vname, errlvl)
 end
 baseEnvironment.assertType = assertType
 
-function checkName(name, obj, errlvl)
+function checkName(name, obj, errlvl, notUnique)
     assertType("string", name, obj .. " name", errlvl + 1)
 
     if #name < 1 then
         error("vMake error: Name of " .. obj .. " must be non-empty.", errlvl + 1)
     end
 
-    if configs[name] then
-        error("vMake error: Name of " .. obj .. " \"" .. name .. "\" conflicts with an already-defined configuration.", errlvl + 1)
-    elseif archs[name] then
-        error("vMake error: Name of " .. obj .. " \"" .. name .. "\" conflicts with an already-defined architecture.", errlvl + 1)
-    elseif projects[name] then
-        error("vMake error: Name of " .. obj .. " \"" .. name .. "\" conflicts with an already-defined project.", errlvl + 1)
+    local nname = normalizeName(name)
+
+    if nname[1] == "-" or nname[#nname] == '-' then
+        error("vMake error: Name of " .. obj .. " (\"" .. name .. "\") needs to begin and end with alphanumeric characters.", errlvl + 1)
     end
+
+    if not notUnique then
+        if configs[nname] then
+            error("vMake error: Name of " .. obj .. " \"" .. name .. "\" conflicts with an already-defined configuration.", errlvl + 1)
+        elseif archs[nname] then
+            error("vMake error: Name of " .. obj .. " \"" .. name .. "\" conflicts with an already-defined architecture.", errlvl + 1)
+        elseif projects[nname] then
+            error("vMake error: Name of " .. obj .. " \"" .. name .. "\" conflicts with an already-defined project.", errlvl + 1)
+        end
+    end
+
+    return nname
+end
+
+function normalizeName(name)
+    return name:gsub("%W+", "-"):lower()
 end
 
 function table.shallowcopy(tab)
@@ -1379,7 +1415,7 @@ do
                 if key == "__class" then
                     return classBases[cName].__class
                 end
-                
+
                 local res = rawget(cBase, key)
                 --  Will look for a property.
 
@@ -1435,7 +1471,7 @@ do
         end
 
         local actualInitializer = (cBase.__init_inherit ~= false) and __init2 or __init
-        
+
         local _class_0 = setmetatable({
             __init = __init,    --  Poor attempt to prevent retarded usage by changing that function...
             __base = cBase,
@@ -1471,7 +1507,7 @@ do
         classBases[cName] = _base_0
 
         addInheritance(cName, cParentName)
-        
+
         return _class_0
     end
 
@@ -1669,6 +1705,10 @@ do
             return self[_key_path_valu]
         end,
 
+        ToString = function(self)
+            return self[_key_path_valu]
+        end,
+
         Equals = function(self, othr)
             if othr == nil then
                 return false
@@ -1785,7 +1825,13 @@ do
                 return nil
             end
 
-            local res = vmake.Classes.Path(trimEndDirectory(val), "d")
+            val = trimEndDirectory(val)
+
+            if not val then
+                return nil
+            end
+
+            local res = vmake.Classes.Path(val, "d")
 
             if self[_key_path_exst] then
                 assurePathInfo(res)
@@ -2446,7 +2492,7 @@ do
 
             self[_key_data_comp][key] = res
             --  No need to check for nil or something like that.
-            
+
             return res
         end,
 
@@ -2535,11 +2581,12 @@ end
 --  --  --  --  --  --  --  --
 
 do
-    local _key_conf_name, _key_conf_base, _key_conf_aux = {}, {}, {}
+    local _key_conf_name, _key_conf_nnam, _key_conf_base, _key_conf_aux = {}, {}, {}, {}
 
     vmake.CreateClass("Configuration", "WithData", {
-        __init = function(self, name)
+        __init = function(self, name, nname)
             self[_key_conf_name] = name
+            self[_key_conf_nnam] = nname
             self[_key_conf_base] = false
             self[_key_conf_aux ] = false
         end,
@@ -2557,6 +2604,7 @@ do
         end,
 
         Name = { RETRIEVE = _key_conf_name },
+        NormalizedName = { RETRIEVE = _key_conf_nnam },
         Auxiliary = { OVERRIDE = _key_conf_aux, TYPE = "boolean" },
 
         Base = {
@@ -2569,10 +2617,14 @@ do
                     error("vMake error: " .. tostring(self) .. " has already defined its base.", errlvl + 1)
                 end
 
-                assertType({"string", "Configuration"}, val, "base", errlvl + 1)
+                local valType = assertType({"string", "Configuration"}, val, "base", errlvl + 1)
 
-                self[_key_conf_base] = val
-                linkDataWithOther(self, val, errlvl + 1)
+                if valType == "string" then
+                    self[_key_conf_base] = checkName(val, "configuration", errlvl + 1, true)
+                else
+                    self[_key_conf_base] = val
+                    linkDataWithOther(self, val, errlvl + 1)
+                end
             end,
         },
 
@@ -2614,11 +2666,12 @@ end
 --  --  --  --  --  --  --
 
 do
-    local _key_arch_name, _key_arch_base, _key_arch_aux = {}, {}, {}
+    local _key_arch_name, _key_arch_nnam, _key_arch_base, _key_arch_aux = {}, {}, {}, {}
 
     vmake.CreateClass("Architecture", "WithData", {
-        __init = function(self, name)
+        __init = function(self, name, nname)
             self[_key_arch_name] = name
+            self[_key_arch_nnam] = nname
             self[_key_arch_base] = false
             self[_key_arch_aux ] = false
         end,
@@ -2636,6 +2689,7 @@ do
         end,
 
         Name = { RETRIEVE = _key_arch_name },
+        NormalizedName = { RETRIEVE = _key_arch_nnam },
         Auxiliary = { OVERRIDE = _key_arch_aux, TYPE = "boolean" },
 
         Base = {
@@ -2648,10 +2702,14 @@ do
                     error("vMake error: " .. tostring(self) .. " has already defined its base.", errlvl + 1)
                 end
 
-                assertType({"string", "Architecture"}, val, "base", errlvl + 1)
+                local valType = assertType({"string", "Architecture"}, val, "base", errlvl + 1)
 
-                self[_key_arch_base] = val
-                linkDataWithOther(self, val, errlvl + 1)
+                if valType == "string" then
+                    self[_key_arch_base] = checkName(val, "architecture", errlvl + 1, true)
+                else
+                    self[_key_arch_base] = val
+                    linkDataWithOther(self, val, errlvl + 1)
+                end
             end,
         },
 
@@ -2695,11 +2753,12 @@ end
 do
     local _key_proj_name, _key_proj_type, _key_proj_desc, _key_proj_dire = {}, {}, {}, {}
     local _key_proj_comp, _key_proj_ruls, _key_proj_ownr, _key_proj_outp = {}, {}, {}, {}
-    local _key_proj_deps = {}
+    local _key_proj_deps, _key_proj_nnam = {}, {}
 
     vmake.CreateClass("Project", "WithData", {
-        __init = function(self, name, tp)
+        __init = function(self, name, nname, tp)
             self[_key_proj_name] = name
+            self[_key_proj_nnam] = nname
             self[_key_proj_type] = tp
             self[_key_proj_desc] = false
             self[_key_proj_dire] = false
@@ -2728,6 +2787,7 @@ do
         end,
 
         Name = { RETRIEVE = _key_proj_name },
+        NormalizedName = { RETRIEVE = _key_proj_nnam },
         Type = { RETRIEVE = _key_proj_type },
         Description = { OVERRIDE = _key_proj_desc, TYPE = "string" },
         Owner = { RETRIEVE = _key_proj_ownr },
@@ -2781,7 +2841,7 @@ do
                 local i = 1
 
                 val = val:Select(function(dep)
-                    assertType("string", dep, "dependencies list item #" .. i, errlvl + 1)
+                    dep = checkName(dep, "dependencies list item #" .. i, errlvl + 1, true)
 
                     local item = projects[dep]
 
@@ -2798,8 +2858,8 @@ do
                     return item
                 end):Seal()
             elseif valType == "string" then
-                local item = val
-                val = projects[val]
+                local item = checkName(val, "dependency", errlvl + 1, true)
+                val = projects[item]
 
                 if not val and self[_key_proj_ownr] then
                     val = self[_key_proj_ownr][_key_proj_comp][item]
@@ -2920,13 +2980,13 @@ do
                     error("vMake error: " .. tostring(self) .. " cannot contain a top-level project as a member!", 2)
                 end
 
-                if self:GetMember(mem.Name) then
+                if self:GetMember(mem.NormalizedName) then
                     error("vMake error: " .. mem .. " conflicts with an already-defined member.", 2)
                 end
 
                 local tab = self[_key_proj_comp]
 
-                tab[mem.Name] = mem
+                tab[mem.NormalizedName] = mem
                 tab[#tab + 1] = mem
 
                 setProjectOwner(mem, self, 2)
@@ -3092,7 +3152,7 @@ do
             if not self[_key_rule_fltr] then
                 error("vMake error: " .. tostring(self) .. " does not define a filter.", 2)
             end
-            
+
             local valType = typeEx(val)
 
             if valType == "function" then
@@ -3150,7 +3210,7 @@ do
                 -- error("vMake error: " .. tostring(self) .. " does not define a filter.", 2)
                 return false
             end
-            
+
             local val = self[_key_rule_sorc]
             local valType = assertType({"string", "Path", "List", "function"}, val, "source expansion result", 2)
 
@@ -3286,7 +3346,7 @@ do
             han = withEnvironment(han, getEnvironment(self))
 
             local oldCodeLoc = codeLoc; codeLoc = LOC_CMDO_HAN
-            
+
             local res = han(val)
 
             codeLoc = oldCodeLoc
@@ -3478,7 +3538,7 @@ if lfs then
 
             dir = tostring(dir)
         end
-        
+
         if rec and (rec < 0 or rec % 1 ~= 0) then
             error("vMake error: Recursivity must be a non-negative integer, or nil, not " .. tostring(rec) .. ".", 2)
         end
@@ -3549,7 +3609,7 @@ if lfs then
             error("vMake error: Directories can only be created from rule actions or command-line option handlers.")
         end
 
-        if codeLoc ~= 0 and vmake.Capturing then
+        if codeLoc ~= 0 and (vmake.Capturing or vmake.ShouldGenerateMakefile) then
             if prog ~= false then
                 return sh.silent("mkdir", "-p", dir)
             else
@@ -3737,7 +3797,7 @@ function fs.Copy(dst, src, ovr, bufSize)
         error("vMake error: Files can only be copied from rule actions or command-line option handlers.")
     end
 
-    if codeLoc ~= 0 and vmake.Capturing then
+    if codeLoc ~= 0 and (vmake.Capturing or vmake.ShouldGenerateMakefile) then
         if ovr then
             return sh.silent("cp", "-f", src, dst)
         else
@@ -3818,6 +3878,8 @@ local function shell_string(cmd, ...)
             nextIsRaw = false
         elseif argType == "List" then
             arg:ForEach(function(item) appendArg(item, tab, errlvl) end)
+        elseif argType == "Project" or argType == "Architecture" or argType == "Configuration" then
+            tab[#tab + 1] = arg.NormalizedName
         elseif arg == SH_AND then
             tab[#tab + 1] = "&&"
         elseif arg == SH_SEP then
@@ -3847,7 +3909,24 @@ function shellmeta.__call(self, cmd, ...)
 
     local printCmd = vmake.Verbose or not (self[_key_shll_slnt] or vmake.Silent)
 
-    if codeLoc == LOC_RULE_ACT and vmake.Capturing then
+    if codeLoc == LOC_RULE_ACT and vmake.ShouldGenerateMakefile then
+        local res = vmake.ShouldGenerateMakefile
+
+        res[#res + 1] = "\t"
+
+        if self[_key_shll_slnt] then
+            res[#res + 1] = "@"
+        end
+
+        if self[_key_shll_tolr] then
+            res[#res + 1] = "-"
+        end
+
+        res[#res + 1] = cmd
+        res[#res + 1] = "\n"
+
+        return "ADDED TO MAKEFILE"
+    elseif codeLoc == LOC_RULE_ACT and vmake.Capturing then
         local lastLog = vmake.CommandLog:Last()
 
         if lastLog and lastLog.WorkItem == curWorkItem then
@@ -3872,7 +3951,7 @@ function shellmeta.__call(self, cmd, ...)
         --  If the last logged command belongs to the same work item, simply
         --  append another command to it.
 
-        return "UNKNOWN"
+        return "CAPTURED"
     else
         if printCmd then
             print(cmd)
@@ -4063,7 +4142,7 @@ function vmake.ValidateAndDefault()
     --  Step 4, validate archs and configs.
 
     if #archs == 0 then
-        Architecture "default-arch"
+        Architecture "Default Arch"
     end
 
     for i = #archs, 1, -1 do
@@ -4073,7 +4152,7 @@ function vmake.ValidateAndDefault()
     end
 
     if #configs == 0 then
-        Configuration "default-conf"
+        Configuration "Default Conf"
     end
 
     for i = #configs, 1, -1 do
@@ -4125,7 +4204,7 @@ function vmake.ValidateAndDefault()
     if not outDir then
         if #archs > 1 or #configs > 1 then
             OutputDirectory(function()
-                return "./.vmake/" .. (selArch.Name .. "." .. selConf.Name)
+                return "./.vmake/" .. (selArch.NormalizedName .. "." .. selConf.NormalizedName)
             end)
         else
             OutputDirectory "./.vmake"
@@ -4136,8 +4215,26 @@ end
 function vmake.CheckArguments()
     if not arg then return end
 
+    vmake.TransferredArguments = List { }
+    function baseEnvironment.TransferArgument(val)
+        assertType("string", val, "transferred argument", 2)
+
+        if val:sub(1, 2) ~= "--" then
+            error("vMake error: Transferred arguments must be in the form of long command-line option names.", 2)
+        end
+
+        local eqPos = val:find('=', 3, true)
+        local optName = eqPos and val:sub(3, eqPos - 1) or val:sub(3)
+
+        if not cmdlopts[optName] then
+            error("vMake error: Cannot transfer unregistered option \"" .. optName .. "\".", 2)
+        end
+
+        vmake.TransferredArguments:Append(val)
+    end
+
     local i, n, acceptOptions = 1, #arg, true
-    local selProj, selArch, selConf
+    local selProj, selArch, selConf = List { }, List { }, List { }
 
     while i <= n do
         local cur, usedNextArg = arg[i], false
@@ -4242,29 +4339,23 @@ function vmake.CheckArguments()
                 --  So, this ought to be a project, architecture and configuration
                 --  specification.
 
-                local proj, arch, conf = projects[cur], archs[cur], configs[cur]
+                local nname = normalizeName(cur)
+
+                if nname[1] == "-" or nname[#nname] == "-" then
+                    error("vMake error: Name (\"" .. name .. "\") needs to begin and end with alphanumeric characters.", 3)
+                end
+
+                local proj, arch, conf = projects[nname], archs[nname], configs[nname]
 
                 if proj then
-                    if selProj then
-                        error("vMake error: Default project is already chosen to be " .. tostring(selProj) .. "; cannot set it to " .. tostring(proj) .. ".")
-                    end
-
-                    selProj = proj
+                    selProj:Append(proj)
                 elseif arch then
-                    if selArch then
-                        error("vMake error: Default architecture is already chosen to be " .. tostring(selArch) .. "; cannot set it to " .. tostring(arch) .. ".")
-                    end
+                    selArch:Append(arch)
 
-                    selArch = arch
-                    
                     assert(not arch.Auxiliary, "vMake error: Selected architecture is auxiliary.")
                 elseif conf then
-                    if selConf then
-                        error("vMake error: Default configuration is already chosen to be " .. tostring(selConf) .. "; cannot set it to " .. tostring(conf) .. ".")
-                    end
+                    selConf:Append(conf)
 
-                    selConf = conf
-                    
                     assert(not conf.Auxiliary, "vMake error: Selected configuration is auxiliary.")
                 else
                     error("vMake error: There is no project, architecture or configuration named \"" .. cur .. "\".")
@@ -4275,12 +4366,29 @@ function vmake.CheckArguments()
         i = i + (usedNextArg and 2 or 1)
     end
 
-    if selProj then defaultProj = selProj end
-    if selArch then defaultArch = selArch end
-    if selConf then defaultConf = selConf end
+    if selProj.Length == 0 then selProj:Append(defaultProj) end
+    if selArch.Length == 0 then selArch:Append(defaultArch) end
+    if selConf.Length == 0 then selConf:Append(defaultConf) end
 
-    baseEnvironment.selArch, baseEnvironment.selConf, baseEnvironment.selProj = defaultArch, defaultConf, defaultProj
+    local combos = CartesianProduct(selProj, selArch, selConf)
+
+    if combos.Length == 1 then
+        defaultProj = selProj[1]
+        defaultArch = selArch[1]
+        defaultConf = selConf[1]
+
+        baseEnvironment.selArch, baseEnvironment.selConf, baseEnvironment.selProj = defaultArch, defaultConf, defaultProj
+    else
+        vmake.Combinations = combos
+    end
+
     --  Done.
+end
+
+function vmake.ValidateArguments()
+    if vmake.Jobs and vmake.Target and vmake.Target ~= "full" then
+        error("vMake error: Job count can only be provided when executing partial or full builds; current target is \"" .. vmake.Target .. "\".")
+    end
 end
 
 function vmake.ExpandProperties()
@@ -4737,16 +4845,31 @@ function vmake.DoWork()
 
     local doItem, doLoad
 
-    doItem = function(item)
+    doItem = function(item, noFilter)
         if item.Done then
             return true
         end
 
+        local filterSucceeds, filterAffectsPreqs = true, true
+
+        if vmake.ItemFilter and not noFilter then
+            filterSucceeds, filterAffectsPreqs = vmake.ItemFilter(item)
+
+            if not filterSucceeds and filterAffectsPreqs then return true end
+            --  No need to bother with prerequisites if the filter blocks them and the item.
+            --  Blockage does not constitute failure. Also not marked as done, because more than
+            --  one item may depend on this, and that one might pass the filter.
+
+            noFilter = filterSucceeds and filterAffectsPreqs
+        else
+            noFilter = true
+        end
+
         local res = item.Prerequisites:Any(function(preq)
             if typeEx(preq) == "WorkLoad" then
-                return not doLoad(preq)
+                return not doLoad(preq, noFilter)
             else
-                return not doItem(preq)
+                return not doItem(preq, noFilter)
             end
         end)
         --  This will stop when the first one fails.
@@ -4754,6 +4877,11 @@ function vmake.DoWork()
         if res then
             return false
         end
+
+        if not filterSucceeds then return true end
+        --  No need to execute the action if the filter blocks the item.
+
+        setWorkEntityDone(item)
 
         local act = withEnvironment(item.Rule.Action, getEnvironment(item.Rule))
 
@@ -4772,18 +4900,16 @@ function vmake.DoWork()
                 , " for \"", tostring(item.Path), "\":\n", res:Print())
         end
 
-        setWorkEntityDone(item)
-
         return not res.Error
     end
-    
-    doLoad = function(load)
+
+    doLoad = function(load, noFilter)
         if load.Done then
             return true
         end
 
         local res = load.Prerequisites:Any(function(preq)
-            return not doLoad(preq)
+            return not doLoad(preq, noFilter)
         end)
 
         if res then
@@ -4791,11 +4917,11 @@ function vmake.DoWork()
         end
 
         return not load.Items:Any(function(item)
-            return not doItem(item)
+            return not doItem(item, noFilter)
         end)
     end
 
-    return doLoad(vmake.WorkGraph)
+    return doLoad(vmake.WorkGraph, false)
 end
 
 function vmake.HandleCapture()
@@ -4803,7 +4929,21 @@ function vmake.HandleCapture()
         return
     end
 
-    if vmake.JobsDir then
+    if vmake.Target == "extract-commands" then
+        return vmake.ExtractCommands()
+    end
+
+    if vmake.Target == "generate-shell-script" then
+        return vmake.GenerateShellScript(vmake.TargetPath)
+    end
+
+    if vmake.Jobs and vmake.Jobs ~= 1 then
+        if not vmake.HasGnuParallel then
+            --  Then GNU Parallel must be available...
+
+            error("vMake error: GNU Parallel is required (for now, in $PATH) for non-serial execution.")
+        end
+
         fs.MkDir(vmake.JobsDir)
 
         local shFiles = {}
@@ -4937,6 +5077,334 @@ function vmake.HandleCapture()
             end
         end
     end
+end
+
+function vmake.GenerateMakefile(path)
+    if not vmake.WorkGraph then
+        error("vMake error: Unable to do work before building the work graph.")
+    end
+
+    if vmake.WorkGraph.Done then
+        print("Nothing to do; everything is up-to-date.")
+    end
+
+    if tostring(path) == "/" then
+        --  This is a shortcut to the output directory.
+
+        path = outDir + "Makefile"
+
+        fs.MkDir(outDir)
+    else
+        local parent = path:GetParent()
+
+        if parent then
+            fs.MkDir(parent)
+        end
+    end
+
+    local mkfDesc, mkfErr = io.open(tostring(path), "w+")
+
+    if not mkfDesc then
+        error("vMake error: Unable to create makefile \"" .. tostring(path) .. "\": " .. tostring(mkfErr), 4)
+    end
+
+    local suffix = string.format(".%s.%s.%s", defaultProj.NormalizedName, defaultArch.NormalizedName, defaultConf.NormalizedName)
+
+    local res = {"# Generated by vMake ", vmake.Version, "\
+.PHONY: all build clean all", suffix, " build", suffix, " clean", suffix, "\
+\
+all:: all", suffix, "\
+build:: build", suffix, "\
+clean:: clean", suffix, "\
+\
+all", suffix, ": build", suffix, "\
+\
+clean", suffix, ":\
+\t@", sh.string("rm", "-Rf", outDir), "\
+\
+"}
+
+    local function appendPath(res, pth)
+        res[#res + 1] = tostring(pth):gsub("[%s|:\\]", L "|s| '\\\\' .. s")
+    end
+
+    local function appendPreqs(res, preqs, deps, dirs)
+        preqs:ForEach(function(dep)
+            local depType, str = typeEx(dep)
+
+            if depType == "WorkLoad" then
+                return appendPreqs(res, dep.Items, deps, dirs)
+            elseif depType == "WorkItem" then
+                dep = dep.Path
+            end
+
+            str = tostring(dep)
+
+            if not deps[str] then
+                deps[str] = true
+
+                if dep.IsDirectory then
+                    dirs[#dirs + 1] = " \\\n "
+                    appendPath(dirs, str)
+                else
+                    res[#res + 1] = " \\\n "
+                    appendPath(res, str)
+                end
+            end
+        end)
+    end
+
+    vmake.ShouldGenerateMakefile = res
+
+    local doItem, doLoad
+
+    function doItem(arr, item, extrapreqs, done)
+        if item.Done then
+            return true
+        end
+
+        local res = item.Prerequisites:Any(function(preq)
+            if typeEx(preq) == "WorkLoad" then
+                return not doLoad(arr, preq, false)
+            else
+                return not doItem(arr, preq, extrapreqs, table.shallowcopy(done))
+            end
+        end)
+        --  This will stop when the first one fails.
+
+        if res then
+            return false
+        end
+
+        setWorkEntityDone(item)
+
+        if item.Path.MakeDependencies then
+            arr[#arr + 1] = "-include "
+            appendPath(arr, item.Path.MakeDependencies)
+            arr[#arr + 1] = "\n\n"
+        end
+
+        appendPath(arr, item.Path)
+
+        local hasPreqs = item.Prerequisites.Length > 1
+        local hasSrcs = item.Sources and item.Sources.Length > 1
+
+        if hasPreqs or hasSrcs or extrapreqs then
+            local dirs = { }
+            arr[#arr + 1] = ":"
+
+            if hasPreqs then appendPreqs(arr, item.Prerequisites, done, dirs) end
+            if hasSrcs then appendPreqs(arr, item.Sources, done, dirs) end
+
+            if extrapreqs then
+                arr[#arr + 1] = " | "
+                arr[#arr + 1] = extrapreqs
+
+                if #dirs > 0 then
+                    arr[#arr + 1] = table.concat(dirs)
+                end
+            elseif #dirs > 0 then
+                arr[#arr + 1] = " | "
+                arr[#arr + 1] = table.concat(dirs)
+            end
+
+            arr[#arr + 1] = "\n"
+        else
+            arr[#arr + 1] = ":\n"
+        end
+
+        local act = withEnvironment(item.Rule.Action, getEnvironment(item.Rule))
+
+        MSG("Emulating ", item)
+
+        local oldCodeLoc = codeLoc; codeLoc = LOC_RULE_ACT
+        curWorkItem = item
+
+        res = vcall(act, item.Path, item.Sources)
+
+        curWorkItem = nil
+        codeLoc = oldCodeLoc
+
+        if res.Error then
+            io.stderr:write("Failed to emulate action of ", tostring(item.Rule)
+                , " for \"", tostring(item.Path), "\":\n", res:Print())
+        else
+            arr[#arr + 1] = "\n"
+        end
+
+        return not res.Error
+    end
+
+    function doLoad(arr, load, main)
+        if load.Done then
+            return true
+        end
+
+        local res = load.Prerequisites:Any(function(preq)
+            return not doLoad(arr, preq, false)
+        end)
+
+        if res then
+            return false
+        end
+
+        local extrapreqs, dirs, done, allExtras = { }, { }, { }, false
+        appendPreqs(extrapreqs, load.Prerequisites, done, dirs)
+
+        if #extrapreqs > 0 or #dirs > 0 then
+            dirs = table.concat(dirs)
+            extrapreqs = table.concat(extrapreqs)
+
+            allExtras = dirs .. extrapreqs
+        end
+
+        res = load.Items:Any(function(item)
+            return not doItem(arr, item, allExtras, table.shallowcopy(done))
+        end)
+
+        if res then
+            return false
+        end
+
+        if main then
+            arr[#arr + 1] = "build"
+            arr[#arr + 1] = suffix
+            arr[#arr + 1] = ":"
+
+            appendPreqs(arr, load.Items, done)
+
+            if #extrapreqs > 0 then
+                arr[#arr + 1] = extrapreqs
+            end
+
+            if #dirs > 0 then
+                arr[#arr + 1] = " | "
+                arr[#arr + 1] = dirs
+            end
+
+            arr[#arr + 1] = "\n\n"
+        end
+
+        return true
+    end
+
+    local success = doLoad(res, vmake.WorkGraph, true)
+    --  Add all the logged work items and their commands as recipes.
+
+    if success then
+        for i = 1, #res do
+            mkfDesc, mkfErr = mkfDesc:write(res[i])
+
+            if not mkfDesc then
+                error("vMake error: Unable to write chunk #" .. i .. " to generated makefile \"" .. tostring(path) .. "\": " .. tostring(mkfErr), 4)
+            end
+        end
+
+        mkfDesc:close()
+
+        return path
+    else
+        return false
+    end
+end
+
+function vmake.GenerateShellScript(path)
+    if tostring(path) == "/" then
+        --  This is a shortcut to the output directory.
+
+        path = outDir + "build.sh"
+
+        fs.MkDir(outDir)
+    else
+        local parent = path:GetParent()
+
+        if parent then
+            fs.MkDir(parent)
+        end
+    end
+
+    local shsDesc, shsErr = io.open(tostring(path), "w+")
+
+    if not shsDesc then
+        error("vMake error: Unable to create shell script \"" .. tostring(path) .. "\": " .. tostring(shsErr), 4)
+    end
+
+    shsDesc:write("#!/bin/sh\n# Generated by vMake ")
+    shsDesc:write(vmake.Version)
+    shsDesc, shsErr = shsDesc:write("\n")
+
+    if not shsDesc then
+        error("vMake error: Unable to write initial chunks to generated shell script \"" .. tostring(path) .. "\": " .. tostring(shsErr), 4)
+    end
+
+    vmake.CommandLog:ForEach(function(e)
+        e.Commands:ForEach(function(cmd, last)
+            if last then
+                if last.Tolerant then
+                    shsDesc:write("; ")
+                else
+                    shsDesc:write(" && ")
+                end
+            end
+
+            shsDesc:write(cmd.Command)
+            return cmd
+        end, nil)
+
+        shsDesc, shsErr = shsDesc:write("\n")
+
+        if not shsDesc then
+            error("vMake error: Unable to write chunk #" .. i .. " to generated shell script \"" .. tostring(path) .. "\": " .. tostring(shsErr), 4)
+        end
+    end)
+
+    shsDesc:close()
+
+    return path
+end
+
+function vmake.ExtractCommands()
+    local res
+
+    vmake.CommandLog:ForEach(function(e)
+        if e.WorkItem.Path == vmake.TargetPath then
+            if res then
+                error("vMake internal error: More than one rule found that builds path \"" .. tostring(vmake.TargetPath) .. "\".")
+            else
+                res = e
+            end
+        end
+    end)
+
+    if not res then
+        --  Next strategy: it must be the source.
+
+        vmake.CommandLog:ForEach(function(e)
+            local hasSrcs = e.WorkItem.Sources and e.WorkItem.Sources.Length > 1
+
+            if hasSrcs then
+                e.WorkItem.Sources:ForEach(function(pth)
+                    if pth == vmake.TargetPath then
+                        if res then
+                            io.stderr:write("More than one rule found that builds with source \"" .. tostring(vmake.TargetPath) .. "\": \"" .. tostring(res.WorkItem.Path) .. "\" and \"" .. tostring(e.WorkItem.Path) .. "\".\n")
+                            os.exit(5)
+                        else
+                            res = e
+                        end
+                    end
+                end)
+            end
+        end)
+    end
+
+    if not res then
+        io.stderr:write("No rule was found to build \"" .. tostring(vmake.TargetPath) .. "\", or using that as a source.\n")
+        os.exit(6)
+    end
+
+    res.Commands:ForEach(function(cmd)
+        print(cmd.Command)
+    end)
 end
 
 function vmake.PrintData()
@@ -5089,40 +5557,63 @@ function vmake__call()
     vmake.ParallelOpts = vmake.Classes.List()
     vmake.CheckArguments()
 
-    vmake.ExpandProperties()
+    vmake.ValidateArguments()
 
-    if vmake.ShouldClean then
-        sh.silent("rm", "-Rf", outDir)
-    end
+    vmake.FullBuild = targetData[vmake.Target].Full
+    vmake.Capturing = targetData[vmake.Target].Capturing or (vmake.Jobs and vmake.Jobs ~= 1)
 
-    if vmake.ShouldComputeGraph then
-        vmake.WorkGraph = vmake.ConstructWorkGraph()
+    if vmake.Combinations then
+        vmake.RunCombinations()
+    else
+        vmake.ExpandProperties()
 
-        if not vmake.FullBuild then
-            vmake.SanitizeWorkGraph()
+        if vmake.ShouldClean then
+            sh.silent("rm", "-Rf", outDir)
         end
 
-        vmake.ChartWorkGraph()
-
-        if vmake.ShouldDoWork then
-            if vmake.Jobs then
-                vmake.Capturing = true
-                vmake.CommandLog = List { }
+        if vmake.ShouldComputeGraph then
+            if vmake.Target == "generate-makefile" then
+                vmake.ShouldGenerateMakefile = true
+            elseif vmake.HasMake and vmake.Jobs and vmake.Jobs ~= 1 then
+                vmake.ShouldGenerateMakefile = true
+                vmake.TargetPath = "/"
             end
 
-            local res = vmake.DoWork()
+            vmake.WorkGraph = vmake.ConstructWorkGraph()
 
-            if not res then
-                os.exit(2)
+            if not vmake.FullBuild then
+                vmake.SanitizeWorkGraph()
             end
 
-            if vmake.Capturing then
-                vmake.HandleCapture()
-            end
-        end
+            vmake.ChartWorkGraph()
 
-        if vmake.ShouldPrintGraph then
-            print(vmake.PrintData())
+            if vmake.ShouldDoWork then
+                if vmake.ShouldGenerateMakefile then
+                    local mkf = vmake.GenerateMakefile(vmake.TargetPath)
+
+                    if vmake.Jobs and vmake.Jobs ~= 1 then
+                        sh.silent("make", vmake.GenerateMakeOptions(mkf), "build")
+                    end
+                else
+                    if vmake.Capturing then
+                        vmake.CommandLog = List { }
+                    end
+
+                    local res = vmake.DoWork()
+
+                    if not res then
+                        os.exit(2)
+                    end
+
+                    if vmake.Capturing then
+                        vmake.HandleCapture()
+                    end
+                end
+            end
+
+            if vmake.ShouldPrintGraph then
+                print(vmake.PrintData())
+            end
         end
     end
 end
@@ -5135,8 +5626,205 @@ function vmake.CheckGnuParallel()
     if os.execute("parallel --version > /dev/null") then
         vmake.HasGnuParallel = true
     else
-        error("vMake error: GNU Parallel is required (for now, in $PATH) for non-serial execution.")
+        vmake.HasGnuParallel = false
     end
+end
+
+function vmake.CheckMake()
+    if vmake.HasMake then
+        return true
+    end
+
+    if os.execute("make --version > /dev/null") then
+        vmake.HasMake = true
+    else
+        vmake.HasMake = false
+    end
+end
+
+function vmake.GenerateMakeOptions(mkf)
+    local res = List { }
+
+    if vmake.Jobs and vmake.Jobs ~= 1 then
+        res:AppendMany { "--jobs", vmake.Jobs }
+    end
+
+    if mkf then
+        res:AppendMany { "--makefile", mkf }
+    end
+
+    if vmake.Silent then
+        res:Append "--silent"
+    elseif vmake.Verbose then
+        --  TODO: Implement in makefiles...
+
+        res:Append "VERBOSE=true"
+    end
+
+    if vmake.Debug then
+        res:Append "--debug=b"
+    end
+
+    if vmake.Target == "full" then
+        res:Append "--always-make"
+    end
+
+    return res
+end
+
+function vmake.RunCombinations()
+    --  vMake needs to invoke the vMakefile for each individual combination...
+
+    local actFunc, actExt, actRes = nil, nil, function() end
+    local shouldGenerateMakefiles = false
+
+    if not vmake.Target or vmake.Target == "full" then
+        if not vmake.Jobs or vmake.Jobs == 1 then
+            --  Normal build!
+
+            function actFunc(combo)
+                if vmake.Target == "full" then
+                    sh.silent(arg[-1], arg[0], vmake.TransferredArguments, "--full", "--", combo)
+                else
+                    sh.silent(arg[-1], arg[0], vmake.TransferredArguments, "--", combo)
+                end
+            end
+        else
+            --  Parallel build... Best done by combining Makefiles.
+
+            if vmake.HasMake then
+                shouldGenerateMakefiles = true
+
+                function actRes(combos, mkf)
+                    sh.silent("make", vmake.GenerateMakeOptions(mkf), combos:Select(function(combo)
+                        return string.format("all.%s.%s.%s", combo[1].NormalizedName, combo[2].NormalizedName, combo[3].NormalizedName)
+                    end))
+                end
+            else
+                --  GNU Parallel will have to suffice.
+                --  TODO: Aggregate the actual shell scripts and execute it all at once!
+
+                function actFunc(combo)
+                    if vmake.Target == "full" then
+                        sh.silent(arg[-1], arg[0], vmake.TransferredArguments, "--full", "--", combo)
+                    else
+                        sh.silent(arg[-1], arg[0], vmake.TransferredArguments, "--", combo)
+                    end
+                end
+            end
+        end
+    elseif vmake.Target == "generate-makefile" then
+        shouldGenerateMakefiles = true
+
+        if vmake.TargetPath == "/" then
+            error("vMake error: Cannot generate makefiles at default path when targetting more than one combination.")
+        end
+    elseif vmake.Target == "generate-shell-script" then
+        if vmake.TargetPath == "/" then
+            error("vMake error: Cannot generate shell script at default path when targetting more than one combination.")
+        end
+
+        function actFunc(combo)
+            local tmp = os.tmpname()
+            combo.ShellScript = tmp
+
+            sh.silent(arg[-1], arg[0], vmake.TransferredArguments, "--generate-shell-script", tmp, "--", combo)
+        end
+
+        function actRes(combos)
+            local dst = vmake.TargetPath
+
+            local shsDesc, shsErr = io.open(tostring(dst), "w+")
+
+            if not shsDesc then
+                error("vMake error: Unable to open result shell script \"" .. tostring(dst) .. "\": " .. tostring(shsErr))
+            end
+
+            combos:ForEach(function(combo)
+                local tmpDesc, tmpErr = io.open(combo.ShellScript, "r")
+
+                if not shsDesc then
+                    error("vMake error: Unable to open temporary shell script \"" .. combo.ShellScript .. "\": " .. tostring(shsErr))
+                end
+
+                tmpDesc:read()
+                tmpDesc:read()
+                --  Skip the first two lines, which are unnecessary.
+
+                shsDesc, shsErr = shsDesc:write(tmpDesc:read("*a"))
+
+                if not shsDesc then
+                    error("vMake error: Unable to write to result shell script \"" .. tostring(dst) .. "\": " .. tostring(shsErr))
+                end
+
+                tmpDesc:close()
+                os.remove(combo.ShellScript)
+            end)
+
+            shsDesc:close()
+        end
+    elseif vmake.Target == "lint" then
+        function actFunc(combo, failed)
+            if failed then return true end
+
+            local tmp = os.tmpname()
+            combo.ShellScript = tmp
+
+            return not sh.tolerant.silent(arg[-1], arg[0], vmake.TransferredArguments, "--lint", vmake.TargetPath, "--", combo)
+        end
+
+        function actRes(combos, failed)
+            --  Nothing actually needs doing.
+        end
+    end
+
+    if shouldGenerateMakefiles then
+        function actFunc(combo)
+            local tmp = os.tmpname()
+            combo.Makefile = tmp
+
+            sh.silent(arg[-1], arg[0], vmake.TransferredArguments, "--generate-makefile", tmp, "--", combo)
+        end
+
+        local oActRes = actRes
+        function actRes(combos)
+            local dst = vmake.TargetPath or os.tmpname()
+
+            local mkfDesc, mkfErr = io.open(tostring(dst), "w+")
+
+            if not mkfDesc then
+                error("vMake error: Unable to open result makefile \"" .. tostring(dst) .. "\": " .. tostring(mkfErr))
+            end
+
+            combos:ForEach(function(combo)
+                local tmpDesc, tmpErr = io.open(combo.Makefile, "r")
+
+                if not mkfDesc then
+                    error("vMake error: Unable to open temporary makefile \"" .. combo.Makefile .. "\": " .. tostring(mkfErr))
+                end
+
+                mkfDesc, mkfErr = mkfDesc:write(tmpDesc:read("*a"))
+
+                if not mkfDesc then
+                    error("vMake error: Unable to write to result makefile \"" .. tostring(dst) .. "\": " .. tostring(mkfErr))
+                end
+
+                tmpDesc:close()
+                os.remove(combo.Makefile)
+            end)
+
+            mkfDesc:close()
+
+            if oActRes then oActRes(combos, dst) end
+            if not vmake.TargetPath then os.remove(dst) end
+        end
+    end
+
+    if not actFunc then
+        error("vMake error: Cannot perform the requested operation (\"" .. vmake.Target .. "\") on more than one project/architecture/configuration combination.")
+    end
+
+    return actRes(vmake.Combinations:ForEach(actFunc, actExt))
 end
 
 --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
@@ -5144,7 +5832,7 @@ end
 --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
 
 CmdOpt "help" "h" {
-    Description = "Displays available command-line options.",
+    Description = "Displays available command-line options. Won't execute build.",
 
     Handler = function()
         local parts = {}
@@ -5177,9 +5865,29 @@ CmdOpt "help" "h" {
 
         if arg and arg[0] then
             parts[#parts + 1] = "Usage: "
+
+            if arg[-1] then
+                parts[#parts + 1] = arg[-1]
+                parts[#parts + 1] = " "
+            end
+
             parts[#parts + 1] = arg[0]
-            parts[#parts + 1] = " [options] [--] [project, architecture & configuration]\n\n"
+            parts[#parts + 1] = " [options] [--] [projects, architectures & configurations]\n\n"
         end
+
+        parts[#parts + 1] = --  Next lien :B
+[[A combination of a project, architecture and configuration constitutes a target.
+Specifying more than one project, architecture or configuration means every
+single combination will be acted on, and the semantics of that depends on the
+action performed.
+
+When no project/architecture/configuration is specified, the default one is
+selected.
+
+Detailed and up-to-date documentation is available at:
+https://github.com/vercas/vMake/wiki/CommandLine
+
+]]
 
         for i = 1, #cmdlopts do
             local opt = cmdlopts[i]
@@ -5250,17 +5958,17 @@ CmdOpt "help" "h" {
         parts[#parts + 1] = "\nPowered by "
         parts[#parts + 1] = vmake.Description
 
-        print(table.concat(parts))
-        vmake.ShouldComputeGraph = false
+        _G.print(_G.table.concat(parts))
+        _G.os.exit(0)
     end,
 }
 
 CmdOpt "version" "v" {
-    Description = "Displays brief information about vMake.",
+    Description = "Displays brief information about vMake. Won't execute build.",
 
     Handler = function()
-        print(vmake.Description)
-        vmake.ShouldComputeGraph = false
+        _G.print(vmake.Description)
+        _G.os.exit(0)
     end,
 }
 
@@ -5270,6 +5978,8 @@ CmdOpt "debug" {
 
     Handler = function()
         vmake.Debug = true
+
+        TransferArgument("--debug")
     end,
 }
 
@@ -5280,12 +5990,14 @@ CmdOpt "print" {
     Handler = function()
         vmake.ShouldPrintGraph = true
         vmake.ShouldDoWork = false
+
+        TransferArgument("--print")
     end,
 }
 
 CmdOpt "clean" "c" {
     Description = "Cleans the output directory."
-             .. "\nWill not perform a build unless `--full` is also specified.",
+             .. "\nWill not execute a build unless `--full` is also specified.",
 
     Handler = function()
         vmake.ShouldClean = true
@@ -5293,25 +6005,33 @@ CmdOpt "clean" "c" {
         if not vmake.FullBuild then
             vmake.ShouldComputeGraph = false
         end
+
+        TransferArgument("--clean")
     end,
 }
 
 CmdOpt "full" "f" {
     Description = "Indicates that work items should be executed even if they"
-             .. "\nare considered up-to-date.",
+             .. "\nare considered up-to-date."
+             .. "\nWhen paired with `--clean`, it will execute a build.",
 
     Handler = function()
-        vmake.FullBuild = true
+        if vmake.Target then
+            error("vMake error: Conflicting command-line options provided.")
+        end
 
         if vmake.ShouldClean then
             vmake.ShouldComputeGraph = true
         end
+
+        vmake.Target = "full"
     end,
 }
 
 CmdOpt "jobs" "j" {
     Description = "Number of jobs to use for rule action execution."
-             .. "\n0 means unlimited. Defaults to 1, meaning serial execution.",
+             .. "\n0 means unlimited. Defaults to 1, meaning serial execution."
+             .. "\nRequires Make or GNU Parallel.",
 
     Type = "integer",
 
@@ -5320,10 +6040,17 @@ CmdOpt "jobs" "j" {
             error("vMake error: Number of jobs must be 0 for unlimited or a positive integer.")
         end
 
-        if val ~= 1 then
-            vmake.CheckGnuParallel()
+        if vmake.Target and vmake.Target ~= "full" then
+            error("vMake error: Job count can only be provided when executing partial or full builds; current target is \"" .. vmake.Target .. "\".")
+        end
 
-            vmake.Jobs = val
+        vmake.Jobs = val
+
+        if val ~= 1 then
+            vmake.CheckMake()
+            if vmake.HasMake then return end
+
+            vmake.CheckGnuParallel()
         end
     end,
 }
@@ -5334,7 +6061,156 @@ CmdOpt "parallel-bar" {
     Handler = function()
         vmake.CheckGnuParallel()
 
+        if not vmake.HasGnuParallel then
+            error("vMake error: GNU Parallel is not available.")
+        elseif vmake.HasMake then
+            MSG("Make is available, which is preferred over GNU Parallel, therefore the progress bar option is ignored.")
+        end
+
         vmake.ParallelOpts:Append("--bar")
+
+        TransferArgument("--parallel-bar")
+    end,
+}
+
+CmdOpt "generate-makefile" {
+    Description = "Generates a Makefile at the given path for the selected target(s)"
+             .. "\nSet to '/' to place it in the output directory with the file"
+             .. "\nnamed 'Makefile'. Not available when targetting combinations."
+             .. "\nThe Makefile will be capable of doing both incremental and full builds."
+             .. "\nUsing this option will stop vMake from actually executing the build.",
+
+    Type = "path",
+
+    Handler = function(val)
+        if #val < 1 then
+            error("vMake error: Makefile path shouldn't be empty.")
+        end
+
+        if vmake.Target then
+            error("vMake error: Conflicting command-line options provided.")
+        end
+
+        vmake.Target = "generate-makefile"
+        vmake.TargetPath = Path(val)
+
+        function vmake.ItemFilter(it) return true, true end
+
+        if vmake.ShouldClean then
+            vmake.ShouldComputeGraph = true
+        end
+    end,
+}
+
+CmdOpt "generate-shell-script" {
+    Description = "Generates a shell script at the given path for the selected target(s)."
+             .. "\nSet to '/' to place it in the output directory with the file"
+             .. "\nnamed 'build.sh'. Not available when targetting combinations."
+             .. "\nThe shell script will only be capable of doing full builds, serially."
+             .. "\nUsing this option will stop vMake from actually executing the build.",
+
+    Type = "path",
+
+    Handler = function(val)
+        if #val < 1 then
+            error("vMake error: Shell script path shouldn't be empty.")
+        end
+
+        if vmake.Target then
+            error("vMake error: Conflicting command-line options provided.")
+        end
+
+        vmake.Target = "generate-shell-script"
+        vmake.TargetPath = Path(val)
+
+        function vmake.ItemFilter(it) return true, true end
+
+        if vmake.ShouldClean then
+            vmake.ShouldComputeGraph = true
+        end
+    end,
+}
+
+CmdOpt "extract-commands" {
+    Description = "Provides the command(s) used to build the given file (or directory),"
+             .. "\nor to build a unique item with the given path as a source."
+             .. "\nThe commands are sent to standard output."
+             .. "\nUsing this option will stop vMake from actually executing the build.",
+
+    Type = "path",
+
+    Handler = function(val)
+        if #val < 1 then
+            error("vMake error: Extraction path shouldn't be empty.")
+        end
+
+        if vmake.Target then
+            error("vMake error: Conflicting command-line options provided.")
+        end
+
+        val = Path(val)
+
+        vmake.Target = "extract-commands"
+        vmake.TargetPath = val
+
+        function vmake.ItemFilter(it)
+            return it.Path == val or (it.Sources and it.Sources.Length > 1 and it.Sources:Any(function(pth)
+                return pth == val
+            end)), false
+        end
+
+        if vmake.ShouldClean then
+            vmake.ShouldComputeGraph = true
+        end
+    end,
+}
+
+CmdOpt "single-item" {
+    Description = "Executes the command(s) used to build the given file (or directory)"
+             .. "\nand its dependencies."
+             .. "\nUsing this option will stop vMake from executing actions for"
+             .. "\nunrelated items.",
+
+    Type = "path",
+
+    Handler = function(val)
+        if #val < 1 then
+            error("vMake error: Single item path shouldn't be empty.")
+        end
+
+        if vmake.Target then
+            error("vMake error: Conflicting command-line options provided.")
+        end
+
+        val = Path(val)
+        local values
+
+        vmake.Target = "single-item"
+        vmake.TargetPath = val
+
+        function vmake.ItemFilter(it)
+            if not values then
+                values = { [val] = true, [val:ToString()] = true }
+
+                local outDir = getEnvironment(it.Rule).outDir
+
+                if not val.Absolute and not val:StartsWith(outDir) then
+                    val = outDir + val
+
+                    values[val] = true
+                    values[val:ToString()] = true
+                end
+            end
+
+            local match = it.Path
+            match = values[match] or values[match:ToString()]
+
+            return match, match
+        end
+
+        if vmake.ShouldClean then
+            vmake.ShouldComputeGraph = true
+        end
     end,
 }
 
@@ -5347,6 +6223,8 @@ CmdOpt "silent" {
         end
 
         vmake.Silent = true
+
+        TransferArgument("--silent")
     end,
 }
 
@@ -5358,8 +6236,10 @@ CmdOpt "verbose" {
         if vmake.Silent then
             error("vMake error: Cannot be silent and verbose at the same time.")
         end
-        
+
         vmake.Verbose = true
+
+        TransferArgument("--verbose")
     end,
 }
 
@@ -5446,7 +6326,7 @@ local function parseListElement(line, linelen, i)
                     return table.concat(res), i, firstChar, string.format("Special character '%s' at #%d must be followed directly by an identifier or opening square brackets", afterSpecial, i - 1)
                 end
             end
-            
+
             res[#res + 1] = c
 
             afterSpecial = false
@@ -5573,7 +6453,7 @@ local function parseListInner(line, linelen)
                 return arr, err, i
             end
         end
-        
+
         i = i + 1
     end
 
@@ -5661,6 +6541,47 @@ do
     end
     baseEnvironment.List = List
 end
+
+local function cartesianProduct(a, b, first)
+    local res = List { }
+
+    if first then
+        a:ForEach(function(x)
+            res:AppendMany(b:Select(function(y)
+                return List { x, y }
+            end))
+        end)
+    else
+        a:ForEach(function(x)
+            res:AppendMany(b:Select(function(y)
+                return x:Copy():Append(y)
+            end))
+        end)
+    end
+
+    return res
+end
+
+function CartesianProduct(...)
+    local lists = {...}
+
+    if #lists < 2 then
+        error("vMake error: Cartesian product needs at least two lists.")
+    end
+
+    for i = 1, #lists do
+        assertType("List", lists[i], "cartesian product operand #" .. i, 2)
+    end
+
+    local res = cartesianProduct(lists[1], lists[2], true)
+
+    for i = 3, #lists do
+        res = cartesianProduct(res, lists[i], false)
+    end
+
+    return res
+end
+baseEnvironment.CartesianProduct = CartesianProduct
 
 --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
 --  Lambda Utilities
@@ -5769,7 +6690,7 @@ end
     end
 end
 
-DAT = lambdaShortcut("data", "_", function(exp)
+DAT = lambdaShortcut("data", "", function(exp)
     assertType("string", exp, "data lambda expression", 3)
 
     local res, lastSep, lastWasEmpty = {}, nil, false
@@ -5998,10 +6919,23 @@ end
 --  Parses the GCC-generated Make dependency file associated with the given
 --  destination file, if found and possible.
 --  Any form of failure results in an empty list being returned.
-function ParseGccDependencies(dst, src, keepSrc)
+function ParseGccDependencies(dst, src, keepSrc, noShortcut)
     assertType("Path", dst, "destination file")
     assertType({"nil", "Path"}, src, "main source file")
     assertType({"nil", "boolean"}, keepSrc, "keep source")
+    assertType({"nil", "boolean"}, noShortcut, "no shortcut")
+
+    local dep = dst:ChangeExtension("d")
+    --  '.o' -> '.d'
+
+    if vmake.ShouldGenerateMakefile and not noShortcut then
+        --  If a Makefile is being generated, no need to do this step.
+        --  Simply note that this path has associated Make dependencies.
+
+        dst.MakeDependencies = dep
+
+        return keepSrc and vmake.Classes.List(false, { src }) or vmake.Classes.List()
+    end
 
     if not fs.GetInfo(dst) then
         --  Destination doesn't exist? It will be created anyway, so parsing the
@@ -6009,9 +6943,6 @@ function ParseGccDependencies(dst, src, keepSrc)
 
         return keepSrc and vmake.Classes.List(false, { src }) or vmake.Classes.List()
     end
-
-    local dep = dst:ChangeExtension("d")
-    --  '.o' -> '.d'
 
     local fDep, errDep = io.open(tostring(dep), "r")
 
@@ -6262,11 +7193,71 @@ local function generateManagedComponent(compType)
             Opts_Includes      = DAT "Opts_Includes_Base",
             Opts_Includes_Nasm = DAT "Opts_Includes_Nasm_Base",
 
+            Libraries = List { },   --  Default to none.
             Opts_Libraries = function()
                 return Libraries:Select(L "|val| '-l' .. val")
             end,
 
-            Libraries = List { },   --  Default to none.
+            LinkerScript = false,
+            Opts_LD_LinkerScript = function()
+                if LinkerScript then
+                    return List { "-T", LinkerScript }
+                else
+                    return List { }
+                end
+            end,
+
+            Opts_Lint_Unsupported = function()
+                if Linting then
+                    _G.error("Linting this file type is not supported.")
+                else
+                    return List { }
+                end
+            end,
+
+            Opts_Lint_GCC = function()
+                if Linting then
+                    return List { "-fsyntax-only" }
+                else
+                    return List { }
+                end
+            end,
+
+            Opts_Lint_C   = DAT "Opts_Lint_GCC",
+            Opts_Lint_CXX = DAT "Opts_Lint_GCC",
+            Opts_Lint_GAS = DAT "Opts_Lint_GCC",
+
+            Opts_Lint_NASM = DAT "Opts_Lint_Unsupported",
+            --  TODO?
+
+            Opts_Lint_LD   = DAT "Opts_Lint_Unsupported",
+            Opts_Lint_AR   = DAT "Opts_Lint_Unsupported",
+
+            Opts_Make_GCC = function()
+                if UseMakeDependencies and not Linting then
+                    return List "-MD -MP"
+                else
+                    return List { }
+                end
+            end,
+
+            Opts_Make_C   = DAT "Opts_Make_GCC",
+            Opts_Make_CXX = DAT "Opts_Make_GCC",
+            Opts_Make_GAS = DAT "Opts_Make_GCC",
+
+            Opts_Make_NASM = function()
+                if UseMakeDependencies then
+                    return function(dst)
+                        return List { "-MP", "-MF", dst:ChangeExtension("d") }
+                    end
+                else
+                    local emptyList = List { }
+
+                    return function(dst)
+                        return emptyList
+                    end
+                end
+            end,
 
             ObjectsDirectory = DAT "outDir + comp.Directory",
 
@@ -6348,8 +7339,6 @@ local function generateManagedComponent(compType)
             BinaryPath = DAT "comp.Output:First()",
 
             BinaryDependencies = List { },
-
-            LinkerScript = false,
         }
 
         local langsProvided, targetProvided, excusesHeaders = false, false, false
@@ -6395,7 +7384,7 @@ local function generateManagedComponent(compType)
 
                     Source = sourceArchitecturalCode,
 
-                    Action = ACT "!CC !Opts_C -x c -c !src[1] -o !dst",
+                    Action = ACT "!CC !Opts_C -x c -c !src[1] -o !dst !Opts_Lint_C !Opts_Make_C",
                 })
 
                 comp:AddMember(Rule "Precompile C Header" {
@@ -6403,7 +7392,7 @@ local function generateManagedComponent(compType)
 
                     Source = sourceArchitecturalHeader,
 
-                    Action = ACT "!CC !Opts_C -x c-header -c !src[1] -o !dst",
+                    Action = ACT "!CC !Opts_C -x c-header -c !src[1] -o !dst !Opts_Lint_C !Opts_Make_C",
                 })
             end
 
@@ -6413,7 +7402,7 @@ local function generateManagedComponent(compType)
 
                     Source = sourceArchitecturalCode,
 
-                    Action = ACT "!CXX !Opts_CXX -x c++ -c !src[1] -o !dst",
+                    Action = ACT "!CXX !Opts_CXX -x c++ -c !src[1] -o !dst !Opts_Lint_CXX !Opts_Make_CXX",
                 })
 
                 comp:AddMember(Rule "Precompile C++ Header" {
@@ -6421,7 +7410,7 @@ local function generateManagedComponent(compType)
 
                     Source = sourceArchitecturalHeader,
 
-                    Action = ACT "!CXX !Opts_CXX -x c++-header -c !src[1] -o !dst",
+                    Action = ACT "!CXX !Opts_CXX -x c++-header -c !src[1] -o !dst !Opts_Lint_CXX !Opts_Make_CXX",
                 })
             end
 
@@ -6431,7 +7420,7 @@ local function generateManagedComponent(compType)
 
                     Source = sourceArchitecturalCode,
 
-                    Action = ACT "!GAS !Opts_GAS -x assembler-with-cpp -c !src[1] -o !dst",
+                    Action = ACT "!GAS !Opts_GAS -x assembler-with-cpp -c !src[1] -o !dst !Opts_Lint_GAS !Opts_Make_GAS",
                 })
             end
 
@@ -6441,7 +7430,7 @@ local function generateManagedComponent(compType)
 
                     Source = sourceArchitecturalCode,
 
-                    Action = ACT "!AS !Opts_NASM !src[1] -o !dst",
+                    Action = ACT "!AS !Opts_NASM !src[1] -o !dst !Opts_Lint_NASM !Opts_Make_NASM(dst)",
                 })
             end
 
@@ -6463,13 +7452,7 @@ local function generateManagedComponent(compType)
                         end
                     end,
 
-                    Action = function(dst, src)
-                        if LinkerScript then
-                            sh.silent(LD, Opts_LD, "-T", LinkerScript, "-o", dst, Objects, Opts_Libraries)
-                        else
-                            sh.silent(LD, Opts_LD, "-o", dst, Objects, Opts_Libraries)
-                        end
-                    end,
+                    Action = ACT "!LD !Opts_LD !Opts_Lint_LD !Opts_LD_LinkerScript -o !dst !Objects !Opts_Libraries",
                 })
             elseif targetProvided == "Dynamic Library" then
                 comp:AddMember(Rule "Link Dynamic Library" {
@@ -6483,23 +7466,17 @@ local function generateManagedComponent(compType)
                         end
                     end,
 
-                    Action = function(dst, src)
-                        if LinkerScript then
-                            sh.silent(LD, "-shared", Opts_LD, "-T", LinkerScript, "-o", dst, Objects, Opts_Libraries)
-                        else
-                            sh.silent(LD, "-shared", Opts_LD, "-o", dst, Objects, Opts_Libraries)
-                        end
-                    end,
+                    Action = ACT "!LD -shared !Opts_LD !Opts_Lint_LD !Opts_LD_LinkerScript -o !dst !Objects !Opts_Libraries",
                 })
             elseif targetProvided == "Static Library" then
                 comp:AddMember(Rule "Archive Objects" {
                     Filter = function(dst) return BinaryPath end,
 
                     Source = function(dst)
-                        return Objects + List { dst:GetParent() } + BinaryDependencies 
+                        return Objects + List { dst:GetParent() } + BinaryDependencies
                     end,
 
-                    Action = ACT "!AR !Opts_AR !dst !Objects",
+                    Action = ACT "!AR !Opts_AR !Opts_Lint_AR !dst !Objects",
                 })
             elseif targetProvided ~= "Custom" then
                 error("vMake error: Unknown complex project/component target: " .. tostring(targetProvided)
@@ -6552,4 +7529,77 @@ function DataFromCommand(cmd, fnc)
 
         return fnc(output)
     end
+end
+
+do
+    local linting = false
+
+    function AddLintCmdOpt()
+        CmdOpt "lint" {
+            Description = "Provides the command(s) used to check the syntax of the given file,"
+                     .. "\nfrom a unique item with the given path as a source."
+                     .. "\nThe commands are executed serially."
+                     .. "\nUsing this option will stop vMake from actually executing the build.",
+
+            Type = "path",
+
+            Handler = function(val)
+                if #val < 1 then
+                    error("vMake error: Linting path shouldn't be empty.")
+                end
+
+                if vmake.Target then
+                    error("vMake error: Conflicting command-line options provided.")
+                end
+
+                val = Path(val)
+
+                vmake.Target = "lint"
+                vmake.TargetPath = val
+                linting = true
+
+                function vmake.ItemFilter(it)
+                    return it.Sources and it.Sources.Length > 1 and it.Sources:Any(function(pth)
+                        return pth == val
+                    end), false
+                end
+
+                if vmake.ShouldClean then
+                    vmake.ShouldComputeGraph = true
+                end
+            end,
+        }
+    end
+
+    GlobalData { Linting = function() return linting end }
+end
+
+do
+    local useMake = false
+
+    function AddUseMakeDepsCmdOpt(default)
+        useMake = default ~= false
+
+        CmdOpt "use-make-dependencies" "m" {
+            Description = "Determines whether Make dependency files are emitted when building"
+                     .. "\nsupported items (e.g. C/C++/GAS/NASM files w/ includes) whose"
+                     .. "\ndependencies are dictated by their content."
+                     .. "\nIt is enabled by default if this option is present;"
+                     .. "\nThis will be assumed to be off when linting.",
+
+            Type = "boolean",
+
+            Handler = function(val)
+                if vmake.Target == "lint" then
+                    error("vMake error: Generating Make dependencies while linting is not supported.")
+                end
+
+                useMake = val
+
+                TransferArgument("--use-make-dependencies=" .. _G.tostring(val))
+            end,
+        }
+    end
+
+    GlobalData { UseMakeDependencies = function() return useMake end }
 end
