@@ -60,8 +60,8 @@ local luaVersion = _____________t[1] or _____________t[1/0] or _____________t[__
 --  Taken from http://lua-users.org/lists/lua-l/2016-05/msg00297.html
 
 local vmake, vmake__call, getEnvironment, withEnvironment = {
-    Version = "3.0.0",
-    VersionNumber = 3000000,
+    Version = "3.0.1",
+    VersionNumber = 3000001,
 
     Debug = false,
     Silent = false,
@@ -99,6 +99,8 @@ local vmake, vmake__call, getEnvironment, withEnvironment = {
 
 local baseEnvironment = {
     ["_G"] = _G,    --  No need to hide this.
+    tonumber = tonumber,
+    tostring = tostring,
 }
 
 local codeLoc = 0
@@ -7074,6 +7076,10 @@ local function checkObjectExtension(path, ext, header)
     end
 end
 
+local function isNasmObject(path)
+    return tostring(path):match "^.+%.asm%.o$"
+end
+
 local function sourceArchitecturalCode(dst)
     local file, arch, src, res = parseObjectExtension(dst, false)
 
@@ -7091,7 +7097,7 @@ local function sourceArchitecturalCode(dst)
         end
     end
 
-    if UseMakeDependencies then
+    if UseMakeDependencies and (not isNasmObject(dst) or NasmSupportsMakeOptions) then
         res = ParseGccDependencies(dst, src, true) + List { dst:GetParent() }
     else
         res = List { src, dst:GetParent() }
@@ -7246,7 +7252,7 @@ local function generateManagedComponent(compType)
             Opts_Make_GAS = DAT "Opts_Make_GCC",
 
             Opts_Make_NASM = function()
-                if UseMakeDependencies then
+                if UseMakeDependencies and NasmSupportsMakeOptions then
                     return function(dst)
                         return List { "-MP", "-MF", dst:ChangeExtension("d") }
                     end
@@ -7257,6 +7263,29 @@ local function generateManagedComponent(compType)
                         return emptyList
                     end
                 end
+            end,
+
+            NasmSupportsMakeOptions = function()
+                local fp = _G.io.popen("nasm -v")
+                local output, a, b, c = fp:read("*a")
+
+                if output then
+                    a, b, c = fp:close()
+                end
+
+                if not output or not a or c ~= 0 then
+                    return false
+                end
+
+                a, b, c = output:match "^NASM version (%d+).(%d+).(%d+) compiled on ... %d+ %d+$"
+                a, b, c = tonumber(a), tonumber(b), tonumber(c)
+
+                if not a or not b or not c then
+                    return false
+                end
+
+                return a >= 2 and b >= 11 and c >= 7
+                --  Version 2.11.7 is the first to support this AFAICT.
             end,
 
             ObjectsDirectory = DAT "outDir + comp.Directory",
