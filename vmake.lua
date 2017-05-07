@@ -60,8 +60,8 @@ local luaVersion = _____________t[1] or _____________t[1/0] or _____________t[__
 --  Taken from http://lua-users.org/lists/lua-l/2016-05/msg00297.html
 
 local vmake, vmake__call, getEnvironment, withEnvironment = {
-    Version = "3.0.1",
-    VersionNumber = 3000001,
+    Version = "3.0.2",
+    VersionNumber = 3000002,
 
     Debug = false,
     Silent = false,
@@ -4897,7 +4897,7 @@ function vmake.DoWork()
         curWorkItem = nil
         codeLoc = oldCodeLoc
 
-        if res.Error then
+        if res.Error and vmake.Target ~= "lint" then
             io.stderr:write("Failed to execute action of ", tostring(item.Rule)
                 , " for \"", tostring(item.Path), "\":\n", res:Print())
         end
