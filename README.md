@@ -144,8 +144,8 @@ This is provided through the `OutputDirectory` function as such:
 ```lua
 OutputDirectory "./.vmake"
 --  or
-OutputDirectory(function(_)
-    return "./.vmake/" .. (_.selArch.Name .. "." .. _.selConf.Name)
+OutputDirectory(function()
+    return "./.vmake/" .. (selArch.NormalizedName .. "." .. selConf.NormalizedName)
 end)
 ```
 
@@ -155,7 +155,7 @@ The latter example is actually the default value, resulting in a path like `./.v
 
 Objects declared in vMakefiles make use of functions for providing non-constant values to data items and the majority of properties.  
 
-All these functions receive a **local environment** table as their first argument.  
+All these functions run with **restricted local environment** tables.  
 
 This table contains the following keys:
 - `outDir`: Output directory of the vMakefile, of type `Path`;
@@ -170,6 +170,23 @@ This table contains the following keys:
 - `conf`: Current configuration, if within one;
 - `opt`: Current command-line option, if within one.
 
+The following functions are allowed in restricted environments:
+- `DoNothing`: Does exactly nothing;
+- `List`: Instances a list from a table or from a string;
+- `CartesianProduct`: Returns the cartesian product of the given lists;
+- `NewList`: Creates an empty list;
+- `Path`: Instances a path from a string;
+- `FilePath`: Instances a file path from a string;
+- `DirPath`: Instances a directory path from a string;
+- `L`: Creates a lambda (function) from a string;
+- `GetConfiguration`: Retrieves a declared configuration by name;
+- `GetArchitecture`: Retrieves a declared architecture by name;
+- `TransferArgument`: Transfers a command-line argument to sub-invocations of the vMakefile when called with multiple target tuples;
+- `MSG`: Prints a debug message, all arguments are concatenated and newline is added at the end;
+- `assertType`: Asserts the type of a given value;
+- `type` is mostly the same as standard Lua, except it's extended to discriminate vMake objects (`Project`, `CmdOpt`, etc.);
+- `tonumber`, `tostring`, and `error` are taken from the standard Lua environment.
+
 When any other key is requested from the local environment table, it attempts data resolution (in its `data` key) if possible.  
 Failure to retrieve a key results in an error, not a `nil` value as typical.  
 
@@ -178,8 +195,9 @@ Attempts to modify this table also result in an error.
 ## Build Process
 
 A build targets a specific (top-level) project, architecture and configuration.  
+vMake can try to build multiple projects, architecture, and configuration combinations.
 
-vMake's goal is to construct the files listed in the output of the selected project. To do this, it employs the work item resolution algorithm.  
+vMake's goal is to construct the files listed in the output of the selected project(s). To do this, it employs the work item resolution algorithm.  
 
 ### Work Item Resolution
 
@@ -194,9 +212,9 @@ If a rule wasn't found, it looks through the output list of all child components
 If no rule or child component output was found to match the path, it restarts the algorithm from the parent component/project, if any, **but will only accept shared rules**.  
 
 If a rule is found, a *work item* is created.  
-This work item, or the entire child component which lists the path as output, becomes a dependency of whatever requested this path.  
+This work item becomes a dependency of whatever requested this file.  
 
-If a work item is created (from a rule), the sources of this file are retrieved according to the rule and this algorithm is applied to them as well.  
+If a work item is created (from a rule), the sources of this file are retrieved according to the rule and this algorithm is applied to each of them as well.  
 
 If a source of an item cannot be found, **and it does not exist** in the filesystem, it is clearly an error.  
 
@@ -205,7 +223,7 @@ If a source of an item cannot be found, **and it does not exist** in the filesys
 The build process occurs by calling the `Action`s of every rule involved, for all the work items created.  
 These functions can only use a subset of the vMake API which can be translated into shell commands.  
 
-A work item will only be executed after its dependencies have successfully executed.  
+A work item will only be executed after all its dependencies have successfully executed.  
 
 ### Partial & Full Builds
 
@@ -217,7 +235,21 @@ To force a full build, pass the `--full` command-line argument to the vMakefile.
 
 ### Parallelism
 
-With the aid of **GNU Parallel**, which is an **optional** depdendency, vMake is capable of performing builds in parallel.  
+vMake is capable of using either **Make** (preferred) or **GNU Parallel**, which are **optional** depdendencies, to perform builds in parallel.  
+
+To use parallelism, pass the `--jobs=#`/`-j #` command-line argument to the vMakefile, where `#` is the desired number of jobs that can run in parallel. `0` means unlimited, and `1` means usual serial execution.  
+To get the best performance out of parallel builds, it is recommended to provide the number of hardware threads to this argument. `0` usually yields equally good results, though.  
+
+#### Make
+
+vMake is capable of generating fully-featured makefiles, even when targetting multiple projects, architectures, or configurations.  
+It will use Make's ability to run parallel builds as well.  
+
+This is especially powerful when trying to build multiple targets, as they have no dependencies between each-other.  
+
+vMake even identifies order-only dependencies (e.g. directories) and uses them accordingly to improve performance and correctness.  
+
+#### GNU Parallel
 
 Firstly, the directed dependency graph represented by all the work items (some of which are grouped into `work load`s) is levelled. Items which have no dependencies, or all dependencies are up-to-date, are on level 0, and all the others are one level higher than their highest dependency.  
 This means every work item can be executed as soon as possible and no later.  
@@ -227,12 +259,9 @@ When all the items finished execution, vMake knows every single command (or sequ
 
 These commands are written into files, separated by level, and then `parallel` is invoked with them.  
 
-To use parallelism, pass the `--jobs=#`/`-j #` command-line argument to the vMakefile, where `#` is the desired number of jobs that can run in parallel. `0` means unlimited, and `1` means usual serial execution.  
-To get the best performance out of parallel builds, it is recommended to provide the number of hardware threads to this argument. `0` usually yields equally good results, though.  
-
 #### Errors
 
-vMake is normally perfectly capable of reporting errors even when its actions are invoked indirectly by GNU Parallel, by reading its log files and correlating them with its record of commands and work items.  
+vMake is normally perfectly capable of reporting errors even when its actions are invoked indirectly by Make, or GNU Parallel by reading its log files and correlating them with its record of commands and work items.  
 
 It will report precisely which commands failed (together with rule and destination path), with status code.  
 Note: It will report any number of failed commands, not just one.  
@@ -240,8 +269,29 @@ Note: It will report any number of failed commands, not just one.
 #### Performance
 
 Parallel builds will be faster than serial builds, with the possible exception of some extreme edge cases.  
-Admittedly, it cannot compete yet with the likes of `GNU Make` in parallel speed, but maybe it will get there eventually.  
+It's hardly slower than `GNU Make` in parallel speed on a more modern system. It has to figure out the dependency graph and simulate every rule action.  
+
+In practice, this overhead is nearly constant relative to the size of the project.  
+Having in mind that vMake also offers build configuration (through command-line options), this overhead is orders of magnitude better than running `./configure` or similar tools before building.
 
 #### Integration w/ Other Features
 
 Both partial and full builds can be parallelized, and the computation of work item levels takes this choice into account as well.  
+
+### Build Configuration
+
+The `CmdOpt` class (command-line options) coupled with the data resolution algorithm allows the build system to be fully configurable and highly flexible.  
+
+The parsing of command-line arguments is done by vMake and the vMakefile only needs to handle the value(s) given to it.  
+There are optional features which are nice to have as well, such as autocompletion.
+
+vMake provides a `--help` option that displays information about all the available command-line options, as well as `--_completion` (hidden option) for autocompleting any argument.  
+
+#### Help
+
+The `--help` command provides usage instruction and documents all the available (non-hidden) command-line options, top-level projects, architectures, and configurations.
+
+#### Autocomplete
+
+vMake provides the ability to obtain autocomplete entries for a given command stub, by passing the command (up to the cursor) to the `--_completion` option.  
+When values are to be autocompleted (instead of option/project/architecture/configuration names), the job is delegated to the correct command-line option.

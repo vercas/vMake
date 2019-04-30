@@ -60,8 +60,8 @@ local luaVersion = _____________t[1] or _____________t[1/0] or _____________t[__
 --  Taken from http://lua-users.org/lists/lua-l/2016-05/msg00297.html
 
 local vmake, vmake__call, getEnvironment, withEnvironment = {
-    Version = "3.0.2",
-    VersionNumber = 3000002,
+    Version = "3.1.0",
+    VersionNumber = 3001000,
 
     Debug = false,
     Silent = false,
@@ -101,11 +101,12 @@ local baseEnvironment = {
     ["_G"] = _G,    --  No need to hide this.
     tonumber = tonumber,
     tostring = tostring,
+    error = error,
 }
 
 local codeLoc = 0
 local LOC_DATA_EXP, LOC_RULE_SRC, LOC_RULE_FLT, LOC_RULE_ACT = 1, 2, 3, 4
-local LOC_CMDO_HAN = 5
+local LOC_CMDO_HAN, LOC_CMDO_ACP = 5, 6
 
 local curWorkItem = nil
 
@@ -264,7 +265,7 @@ end
 function GetConfiguration(name)
     return configs[checkName(name, "configuration", 2, true)]
 end
-baseEnvironment.GetConfiguration = baseEnvironment.GetConfiguration
+baseEnvironment.GetConfiguration = GetConfiguration
 
 function Architecture(name)
     local nname = checkName(name, "architecture", 2)
@@ -290,7 +291,7 @@ end
 function GetArchitecture(name)
     return archs[checkName(name, "architecture", 2, true)]
 end
-baseEnvironment.GetArchitecture = baseEnvironment.GetArchitecture
+baseEnvironment.GetArchitecture = GetArchitecture
 
 local function spawnProjectFunction(pType, tName, topLevel)
     return function(name)
@@ -3276,7 +3277,7 @@ end
 do
     local _key_cmdo_name, _key_cmdo_shnm, _key_cmdo_desc, _key_cmdo_hndr = {}, {}, {}, {}
     local _key_cmdo_cnts, _key_cmdo_many, _key_cmdo_mand, _key_cmdo_type = {}, {}, {}, {}
-    local _key_cmdo_disp = {}
+    local _key_cmdo_disp, _key_cmdo_acmp, _key_cmdo_hide = {}, {}, {}
 
     vmake.CreateClass("CmdOpt", "WithData", {
         __init = function(self, name)
@@ -3287,6 +3288,8 @@ do
             self[_key_cmdo_cnts] = 0
             self[_key_cmdo_type] = false
             self[_key_cmdo_disp] = false
+            self[_key_cmdo_acmp] = false
+            self[_key_cmdo_hide] = false
         end,
 
         __tostring = function(self)
@@ -3301,6 +3304,7 @@ do
 
         Name        = { RETRIEVE = _key_cmdo_name },
         Description = { OVERRIDE = _key_cmdo_desc, TYPE = "string"  },
+        Hide        = { OVERRIDE = _key_cmdo_hide, TYPE = "boolean" },
         Count       = { RETRIEVE = _key_cmdo_cnts },
 
         Many        = { OVERRIDE = _key_cmdo_many, TYPE = "boolean" },
@@ -3350,6 +3354,38 @@ do
             local oldCodeLoc = codeLoc; codeLoc = LOC_CMDO_HAN
 
             local res = han(val)
+
+            codeLoc = oldCodeLoc
+        end,
+
+        Autocomplete = {
+            TYPE = "function",
+
+            get = function(self, errlvl)
+                return self[_key_cmdo_acmp]
+            end,
+
+            set = function(self, val, errlvl)
+                if self[_key_cmdo_acmp] then
+                    error("vMake error: " .. tostring(self) .. " has already defined its autocompleter.", errlvl)
+                end
+
+                self[_key_cmdo_acmp] = val
+            end,
+        },
+
+        ExecuteAutocomplete = function(self, parts, val)
+            local han = self[_key_cmdo_acmp]
+
+            if not han then
+                error("vMake error: " .. tostring(self) .. " does not define an autocompleter.", 2)
+            end
+
+            han = withEnvironment(han, getEnvironment(self))
+
+            local oldCodeLoc = codeLoc; codeLoc = LOC_CMDO_ACP
+
+            local res = han(parts, val)
 
             codeLoc = oldCodeLoc
         end,
@@ -5833,6 +5869,377 @@ end
 --  Command-line Options
 --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
 
+local function _ReadInputLine()
+    return io.stdin:read "*l"
+end
+
+local first = true
+local function _WriteDummy(...)
+    local f = io.open("dummy.txt", first and "w+" or "a+")
+    f:write(...)
+    f:close()
+    first = false
+end
+
+CmdOpt "_completion" {
+    Description = "Provides autocomplete support",
+    Hide = true,
+
+    Type = "string",
+
+    Handler = function(val)
+        _WriteDummy(val, "\n")
+        if val:find("./vmakefile.lua ", 1, true) then
+            val = val:sub(17)
+        elseif val:find("../vmakefile.lua ", 1, true) then
+            val = val:sub(18)
+        elseif val:find("vmakefile.lua ", 1, true) then
+            val = val:sub(15)
+        end
+
+        _WriteDummy(val, "\n")
+
+        local parts = {}
+
+        local function printDesc(val)
+            if val.Description then
+                for line in val.Description:iteratesplit("\n", true) do
+                    parts[#parts + 1] = "\t"
+                    parts[#parts + 1] = line
+                    break   --  Only the first line is shown.
+                end
+            end
+
+            parts[#parts + 1] = "\n"
+        end
+
+        local args, endsInSpace, lastOpt = val:split(), val:sub(-1) == " "
+        local i, n, acceptOptions = 1, #args, true
+        local selTargets = List { }
+
+        while i <= n do
+            local cur, usedNextArg = args[i], false
+
+            if cur == "--" then
+                acceptOptions = false
+            elseif #cur > 0 then
+                local function doOption(long, optName, val)
+                    local opt = cmdlopts[optName]
+
+                    if opt and opt.Type then
+                        --  This means this option expects a value.
+                        _WriteDummy(optName, " expects type ", tostring(opt.Type), "\n")
+                        _WriteDummy("i = ", i, "; n = ", n, "; endsInSpace = ", tostring(endsInSpace), "; val = ", val or "-------", "\n")
+
+                        local needsValues = i == n and (endsInSpace or val)
+                        --  This needs a value if:
+                        --  1. Ends with this option followed by space(s); or
+                        --  2. An equal sign was put after the long option name and this is the final option; or
+                        --  3. [HANDLED LATER] This is the second-to-last argument and a value follows.
+
+                        local argPrefix = ""
+
+                        if not val then
+                            needsValues = needsValues or i == n - 1
+                            val = args[i + 1] or ""
+                            usedNextArg = true
+                        elseif not endsInSpace then
+                            --  Means an equal sign is present.
+
+                            argPrefix = "--" .. optName .. "="
+                        end
+
+                        if needsValues then
+                            _WriteDummy("Want value for ", optName, "\n")
+                            _WriteDummy("val = ", val or "-------", "\n")
+
+                            if opt.Autocomplete then
+                                local res = {}
+                                opt:ExecuteAutocomplete(res, val)
+
+                                _WriteDummy("Found ", #res, " results in autocomplete function.\n")
+
+                                for k = 1, #res do
+                                    parts[#parts + 1] = argPrefix
+                                    parts[#parts + 1] = res[k][1];
+
+                                    if res[k][2] then
+                                        parts[#parts + 1] = "\t"
+                                        parts[#parts + 1] = res[k][2]
+                                    end
+
+                                    parts[#parts + 1] = "\n"
+                                end
+
+                                _G.io.stdout:write(_G.table.concat(parts))
+                                _G.os.exit(0)
+                            else
+                                _WriteDummy("No autocomplete.\n")
+                            end
+                            
+                            --  No autocomplete specified... Let's do nothing and let the shell handle this.
+                            return
+                        end
+                    end
+
+                    --  Reaching this point means autocompleting the value is not necessary.
+
+                    if i < n or val then
+                        _WriteDummy("Ignoring ", optName, "\n")
+                        return  --  Option doesn't seem to exist, so ignore?
+                    end
+
+                    --  Otherwise, this option's name is being autocompleted.
+
+                    local shortPrefix = '-' --  Prefix to put on short options.
+                    local acceptShortOpt    --  This determines which short options are accepted.
+                    local acceptLongOpt     --  And which long options.
+
+                    if long then
+                        function acceptShortOpt(opt) return false end
+
+                        function acceptLongOpt(opt)
+                            return opt.Name:find(optName, 1, true)
+                        end
+                    else
+                        if #optName > 0 then
+                            --  This means the current short name doesn't constitute a single option, so it contains
+                            --  a series of short options. Also no long name possible.
+                            shortPrefix = "-" .. optName    --  All suggestions will include existing commands.
+
+                            function acceptShortOpt(opt)
+                                return opt.ShortName and #opt.ShortName == 1 and not optName:find(opt.ShortName, 1, true)
+                            end
+
+                            function acceptLongOpt(opt) return false end
+                        else
+                            --  So all we've got is one hyphen. Then everything goes.
+                            function acceptShortOpt(opt) return true end
+                            function acceptLongOpt(opt) return true end
+                        end
+                    end
+
+                    for j = 1, #cmdlopts do
+                        opt = cmdlopts[j]
+
+                        if not opt.Hide then
+                            if acceptShortOpt(opt) then
+                                parts[#parts + 1] = shortPrefix
+                                parts[#parts + 1] = opt.ShortName
+                                printDesc(opt)
+                            end
+
+                            if acceptLongOpt(opt) then
+                                parts[#parts + 1] = "--"
+                                parts[#parts + 1] = opt.Name
+                                printDesc(opt)
+                            end
+                        end
+                    end
+
+                    _G.print(_G.table.concat(parts))
+                    _G.os.exit(0)
+                end
+
+                if acceptOptions then
+                    if cur:sub(1, 2) == "--" then
+                        --  So this is a long option name.
+
+                        local eqPos = cur:find('=', 3, true)
+
+                        local optName = eqPos and cur:sub(3, eqPos - 1) or cur:sub(3)
+
+                        if #optName >= 2 then
+                            doOption(true,
+                                optName,
+                                eqPos and cur:sub(eqPos + 1) or nil)
+                        end
+                    elseif cur:sub(1, 1) == '-' then
+                        --  So, short option name.
+
+                        for j = 2, #cur do
+                            doOption(false, cur:sub(j, j), nil)
+                        end
+                    end
+                end
+
+                if cur:sub(1, 1) ~= '-' then
+                    --  So, this can to be a project, architecture or configuration
+                    --  specification.
+
+                    if i < n or endsInSpace then
+                        --  Try to add this target to the list of selected targets, so it can be omitted from future
+                        --  suggestions.
+
+                        local nname = normalizeName(cur)
+                        local proj, arch, conf = projects[nname], archs[nname], configs[nname]
+
+                        if proj then
+                            selTargets:Append(proj)
+                        elseif arch then
+                            selTargets:Append(arch)
+                        elseif conf then
+                            selTargets:Append(conf)
+                        end
+                    end
+
+                    if i == n then
+                        --  Then these can be autocompleted.
+
+                        for i = 1, #projects do
+                            local val = projects[i]
+
+                            if not selTargets:Contains(val) then
+                                parts[#parts + 1] = val.Name
+                                printDesc(val)
+                            end
+                        end
+
+                        for i = 1, #archs do
+                            local val = archs[i]
+
+                            if not val.Auxiliary and not selTargets:Contains(val) then
+                                parts[#parts + 1] = val.Name
+                                printDesc(val)
+                            end
+                        end
+
+                        for i = 1, #configs do
+                            local val = configs[i]
+
+                            if not val.Auxiliary and not selTargets:Contains(val) then
+                                parts[#parts + 1] = val.Name
+                                printDesc(val)
+                            end
+                        end
+
+                        _G.print(_G.table.concat(parts))
+                        _G.os.exit(0)
+                    end
+                end
+            end
+
+            i = i + (usedNextArg and 2 or 1)
+        end
+
+        for i = 1, #cmdlopts do
+            local opt = cmdlopts[i]
+
+            if not opt.Hide then
+                if opt.ShortName then
+                    parts[#parts + 1] = "-"
+                    parts[#parts + 1] = opt.ShortName
+                    printDesc(opt)
+                end
+
+                parts[#parts + 1] = "--"
+                parts[#parts + 1] = opt.Name
+                printDesc(opt)
+            end
+        end
+
+        for i = 1, #projects do
+            local val = projects[i]
+
+            parts[#parts + 1] = val.Name
+
+            printDesc(val)
+        end
+
+        for i = 1, #archs do
+            local val = archs[i]
+            local tmp = val.Base
+
+            if not val.Auxiliary then
+                parts[#parts + 1] = val.Name
+                printDesc(val)
+            end
+        end
+
+        for i = 1, #configs do
+            local val = configs[i]
+            local tmp = val.Base
+
+            if not val.Auxiliary then
+                parts[#parts + 1] = val.Name
+                printDesc(val)
+            end
+        end
+
+        _G.print(_G.table.concat(parts))
+        _G.os.exit(0)
+    end,
+}
+
+-- CmdOpt "_completion2" {
+--     Description = "Provides autocomplete support from standard input tokens",
+--     Hide = true,
+
+--     Handler = function()
+--         repeat
+--             local l = _ReadInputLine()
+--             if not l then break end
+--             _WriteDummy("Line: <", l, ">\n")
+--         until false
+
+--         local parts = {}
+
+--         local function printDesc(val)
+--             if val.Description then
+--                 for line in val.Description:iteratesplit("\n", true) do
+--                     parts[#parts + 1] = "\t"
+--                     parts[#parts + 1] = line
+--                     break   --  Only the first line is shown.
+--                 end
+--             end
+
+--             parts[#parts + 1] = "\n"
+--         end
+
+--         for i = 1, #cmdlopts do
+--             local opt = cmdlopts[i]
+
+--             if not opt.Hide then
+--                 parts[#parts + 1] = "--"
+--                 parts[#parts + 1] = opt.Name
+
+--                 printDesc(opt)
+--             end
+--         end
+
+--         for i = 1, #projects do
+--             local val = projects[i]
+
+--             parts[#parts + 1] = val.Name
+
+--             printDesc(val)
+--         end
+
+--         for i = 1, #archs do
+--             local val = archs[i]
+--             local tmp = val.Base
+
+--             if not val.Auxiliary then
+--                 parts[#parts + 1] = val.Name
+--                 printDesc(val)
+--             end
+--         end
+
+--         for i = 1, #configs do
+--             local val = configs[i]
+--             local tmp = val.Base
+
+--             if not val.Auxiliary then
+--                 parts[#parts + 1] = val.Name
+--                 printDesc(val)
+--             end
+--         end
+
+--         _G.print(_G.table.concat(parts))
+--         _G.os.exit(0)
+--     end,
+-- }
+
 CmdOpt "help" "h" {
     Description = "Displays available command-line options. Won't execute build.",
 
@@ -5894,31 +6301,33 @@ https://github.com/vercas/vMake/wiki/CommandLine
         for i = 1, #cmdlopts do
             local opt = cmdlopts[i]
 
-            parts[#parts + 1] = "    --"
-            parts[#parts + 1] = opt.Name
-
-            if opt.Type then
-                parts[#parts + 1] = "=<"
-                parts[#parts + 1] = opt.Display or opt.Type
-                parts[#parts + 1] = ">"
-            end
-
-            if opt.ShortName then
-                parts[#parts + 1] = "  -"
-                parts[#parts + 1] = opt.ShortName
+            if not opt.Hide then
+                parts[#parts + 1] = "    --"
+                parts[#parts + 1] = opt.Name
 
                 if opt.Type then
-                    parts[#parts + 1] = " <"
+                    parts[#parts + 1] = "=<"
                     parts[#parts + 1] = opt.Display or opt.Type
                     parts[#parts + 1] = ">"
                 end
+
+                if opt.ShortName then
+                    parts[#parts + 1] = "  -"
+                    parts[#parts + 1] = opt.ShortName
+
+                    if opt.Type then
+                        parts[#parts + 1] = " <"
+                        parts[#parts + 1] = opt.Display or opt.Type
+                        parts[#parts + 1] = ">"
+                    end
+                end
+
+                parts[#parts + 1] = "\n"
+
+                printDesc(opt)
+
+                parts[#parts + 1] = "\n"
             end
-
-            parts[#parts + 1] = "\n"
-
-            printDesc(opt)
-
-            parts[#parts + 1] = "\n"
         end
 
         parts[#parts + 1] = "Projects:\n"
@@ -7107,6 +7516,10 @@ local function sourceArchitecturalCode(dst)
         res:Append(PrecompiledCppHeaderPath .. ".gch")
     end
 
+    if SourceDependencies then
+        res = res + SourceDependencies
+    end
+
     return res
 end
 
@@ -7148,6 +7561,10 @@ local function sourceArchitecturalHeader(dst)
         res = ParseGccDependencies(dst, src, true) + List { dst:GetParent() }
     else
         res = List { src, dst:GetParent() }
+    end
+
+    if HeaderDependencies then
+        res = res + HeaderDependencies
     end
 
     return res
