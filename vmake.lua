@@ -60,8 +60,8 @@ local luaVersion = _____________t[1] or _____________t[1/0] or _____________t[__
 --  Taken from http://lua-users.org/lists/lua-l/2016-05/msg00297.html
 
 local vmake, vmake__call, getEnvironment, withEnvironment = {
-    Version = "3.1.0",
-    VersionNumber = 3001000,
+    Version = "3.2.0",
+    VersionNumber = 3002000,
 
     Debug = false,
     Silent = false,
@@ -75,6 +75,7 @@ local vmake, vmake__call, getEnvironment, withEnvironment = {
     ShouldPrintGraph = false,
     ShouldClean = false,
     ShouldGenerateMakefile = false,
+    ShouldGenerateCompilationDatabase = false,
 
     FullBuild = false,
     WorkGraph = false,
@@ -123,9 +124,10 @@ local targetData = {
     [false] = { },
     ["full"] = { Full = true },
 
-    ["generate-makefile"]     = { Full = true },
-    ["generate-shell-script"] = { Full = true, Capturing = true },
-    ["extract-commands"]      = { Full = true, Capturing = true },
+    ["generate-makefile"]             = { Full = true },
+    ["generate-shell-script"]         = { Full = true, Capturing = true },
+    ["generate-compilation-database"] = { Full = true, Capturing = true },
+    ["extract-commands"]              = { Full = true, Capturing = true },
 
     ["single-item"] = { },
     ["lint"] = { Full = true },
@@ -4967,12 +4969,16 @@ function vmake.HandleCapture()
         return
     end
 
+    if vmake.Target == "generate-shell-script" then
+        return vmake.GenerateShellScript(vmake.TargetPath)
+    end
+
     if vmake.Target == "extract-commands" then
         return vmake.ExtractCommands()
     end
 
-    if vmake.Target == "generate-shell-script" then
-        return vmake.GenerateShellScript(vmake.TargetPath)
+    if vmake.Target == "generate-compilation-database" then
+        return vmake.GenerateCompilationDatabase(vmake.TargetPath)
     end
 
     if vmake.Jobs and vmake.Jobs ~= 1 then
@@ -5443,6 +5449,93 @@ function vmake.ExtractCommands()
     res.Commands:ForEach(function(cmd)
         print(cmd.Command)
     end)
+end
+
+function vmake.GenerateCompilationDatabase(path)
+    if tostring(path) == "/" then
+        --  This is a shortcut to the standard name.
+
+        path = FilePath "compile_commands.json"
+    else
+        local parent = path:GetParent()
+
+        if parent then
+            fs.MkDir(parent)
+        end
+    end
+
+    local cdbDesc, cdbErr = io.open(tostring(path), "w+")
+
+    if not cdbDesc then
+        error("vMake error: Unable to create compilation database \"" .. tostring(path) .. "\": " .. tostring(cdbErr), 4)
+    end
+
+    cdbDesc, cdbErr = cdbDesc:write("[")
+
+    if not cdbDesc then
+        error("vMake error: Unable to write initial chunk to generated compilation database \"" .. tostring(path) .. "\": " .. tostring(cdbErr), 4)
+    end
+
+    local currentDir = lfs.currentdir()
+
+    vmake.CommandLog:ForEach(function(e, notFirst)
+        local file, command
+
+        if e.WorkItem and e.WorkItem.Sources and e.WorkItem.Sources.Length > 0 then
+            e.WorkItem.Sources:ForEach(function(pth, notFirst)
+                if pth.IsCodeFile then
+                    if notFirst then
+                        error("vMake error: Cannot generate compilation database because work item seems to require more than one code file.")
+                    else
+                        file = pth
+                        return true
+                    end
+                else
+                    return notFirst
+                end
+            end)
+        end
+
+        if not file then
+            --  This work item doesn't seem to compile code. Move on.
+
+            return notFirst
+        end
+
+        if e.Commands.Length ~= 1 then
+            error(string.format("vMake error: Cannot generate compilation database entry for code file %q because it needs more than one command.", file))
+        end
+
+        local cdbEntry = string.format('%s\n\t{\
+\t\t"directory": %q,\
+\t\t"file": %q,\
+\t\t"output": %q,\
+\t\t"command": %q\
+\t}',
+            notFirst and ',' or '',
+            currentDir,
+            tostring(file),
+            tostring(e.WorkItem.Path),
+            e.Commands:First().Command)
+
+        cdbDesc, cdbErr = cdbDesc:write(cdbEntry)
+
+        if not cdbDesc then
+            error("vMake error: Unable to write entry #" .. i .. " to generated compilation database \"" .. tostring(path) .. "\": " .. tostring(cdbErr), 4)
+        end
+
+        return true
+    end, false)
+
+    cdbDesc, cdbErr = cdbDesc:write("\n]\n")
+
+    if not cdbDesc then
+        error("vMake error: Unable to write final chunk to generated compilation database \"" .. tostring(path) .. "\": " .. tostring(cdbErr), 4)
+    end
+
+    cdbDesc:close()
+
+    return path
 end
 
 function vmake.PrintData()
@@ -5976,7 +6069,7 @@ CmdOpt "_completion" {
                             else
                                 _WriteDummy("No autocomplete.\n")
                             end
-                            
+
                             --  No autocomplete specified... Let's do nothing and let the shell handle this.
                             return
                         end
@@ -6487,7 +6580,7 @@ CmdOpt "parallel-bar" {
 CmdOpt "generate-makefile" {
     Description = "Generates a Makefile at the given path for the selected target(s)"
              .. "\nSet to '/' to place it in the output directory with the file"
-             .. "\nnamed 'Makefile'. Not available when targetting combinations."
+             .. "\nnamed 'Makefile'. Can target multiple combinations."
              .. "\nThe Makefile will be capable of doing both incremental and full builds."
              .. "\nUsing this option will stop vMake from actually executing the build.",
 
@@ -6569,6 +6662,41 @@ CmdOpt "extract-commands" {
                 return pth == val
             end)), false
         end
+
+        if vmake.ShouldClean then
+            vmake.ShouldComputeGraph = true
+        end
+    end,
+}
+
+CmdOpt "generate-compilation-database" {
+    Description = "Generates a JSON file which specifies how code files are compiled"
+             .. "\nin the given project(s) at the given path."
+             .. "\nSet to '/' for a shortcut to './compile_commands.json'"
+             .. "\nCan target more than one project at a time."
+             .. "\nUsing this option will stop vMake from actually executing the build.",
+
+    Type = "path",
+
+    Handler = function(val)
+        if #val < 1 then
+            error("vMake error: Compilation database path shouldn't be empty.")
+        end
+
+        if vmake.Target then
+            error("vMake error: Conflicting command-line options provided.")
+        end
+
+        vmake.Target = "generate-compilation-database"
+        vmake.TargetPath = Path(val)
+
+        -- function vmake.ItemFilter(it)
+        --     return (it.Sources and it.Sources.Length > 1 and it.Sources:Any(function(pth)
+        --         return pth.IsCodeFile
+        --     end)), false
+        -- end
+
+        function vmake.ItemFilter(it) return true, true end
 
         if vmake.ShouldClean then
             vmake.ShouldComputeGraph = true
@@ -7435,7 +7563,15 @@ function ParseGccDependencies(dst, src, keepSrc, noShortcut)
     end)
 
     if keepSrc then
-        if not src:Equals(deps:First()) then
+        local firstDep = deps:First()
+
+        if src:Equals(firstDep) then
+            if type(firstDep) == "string" then
+                deps[1] = FilePath(firstDep)
+            end
+
+            deps[1].IsCodeFile = true
+        else
             deps = vmake.Classes.List(false, { src }) + deps:Where(function(val)
                 return not src:Equals(val)
             end)
@@ -7505,6 +7641,8 @@ local function sourceArchitecturalCode(dst)
             src = CommonDirectory + Path(file):Skip(ObjectsDirectory)
         end
     end
+
+    src.IsCodeFile = true
 
     if UseMakeDependencies and (not isNasmObject(dst) or NasmSupportsMakeOptions) then
         res = ParseGccDependencies(dst, src, true) + List { dst:GetParent() }
